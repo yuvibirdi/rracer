@@ -1,0 +1,27 @@
+# Rust
+/target/
+Cargo.lock
+
+# Web build artifacts
+/web/dist/
+/web/pkg/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# Docker
+.dockerignore
