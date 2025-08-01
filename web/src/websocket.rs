@@ -40,21 +40,21 @@ impl WebSocketManager {
         ws.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
         onmessage_callback.forget();
 
-        let onopen_callback = Closure::wrap(Box::new(move |_| {
+        let onopen_callback = Closure::wrap(Box::new(move |_: web_sys::Event| {
             web_sys::console::log_1(&"WebSocket connected".into());
         }) as Box<dyn FnMut(_)>);
         
         ws.set_onopen(Some(onopen_callback.as_ref().unchecked_ref()));
         onopen_callback.forget();
 
-        let onerror_callback = Closure::wrap(Box::new(move |e| {
+        let onerror_callback = Closure::wrap(Box::new(move |_: web_sys::Event| {
             web_sys::console::error_1(&"WebSocket error".into());
         }) as Box<dyn FnMut(_)>);
         
         ws.set_onerror(Some(onerror_callback.as_ref().unchecked_ref()));
         onerror_callback.forget();
 
-        let onclose_callback = Closure::wrap(Box::new(move |_| {
+        let onclose_callback = Closure::wrap(Box::new(move |_: web_sys::CloseEvent| {
             web_sys::console::log_1(&"WebSocket disconnected".into());
         }) as Box<dyn FnMut(_)>);
         

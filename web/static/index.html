@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🏁 rracer - TypeRacer Clone</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Typing styles */
+        .correct-char { 
+            background-color: #22c55e; 
+            color: white;
+            border-radius: 2px;
+        }
+        .current-char { 
+            background-color: #3b82f6; 
+            color: white;
+            animation: blink 1s infinite;
+            border-radius: 2px;
+        }
+        .error-char { 
+            background-color: #ef4444; 
+            color: white;
+            border-radius: 2px;
+        }
+        .incorrect-char {
+            background-color: #fca5a5;
+            border-radius: 2px;
+        }
+        
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0.3; }
+        }
+        
+        .typing-area:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+
+        .passage-text {
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            word-break: normal;
+            white-space: normal;
+            hyphens: none;
+        }
+
+        /* Race track styles */
+        .race-track {
+            background: linear-gradient(90deg, #f3f4f6 0%, #e5e7eb 50%, #f3f4f6 100%);
+            border: 2px solid #d1d5db;
+            border-radius: 8px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .race-lane {
+            border-bottom: 1px dashed #9ca3af;
+            position: relative;
+            height: 60px;
+            display: flex;
+            align-items: center;
+        }
+
+        .race-lane:last-child {
+            border-bottom: none;
+        }
+
+        .car {
+            width: 40px;
+            height: 30px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            transition: transform 0.3s ease;
+            position: absolute;
+            left: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .car-player { background: linear-gradient(45deg, #3b82f6, #1d4ed8); }
+        .car-opponent1 { background: linear-gradient(45deg, #ef4444, #dc2626); }
+        .car-opponent2 { background: linear-gradient(45deg, #22c55e, #16a34a); }
+        .car-opponent3 { background: linear-gradient(45deg, #f59e0b, #d97706); }
+        .car-opponent4 { background: linear-gradient(45deg, #8b5cf6, #7c3aed); }
+
+        .finish-line {
+            position: absolute;
+            right: 10px;
+            top: 0;
+            bottom: 0;
+            width: 4px;
+            background: repeating-linear-gradient(
+                45deg,
+                #000,
+                #000 5px,
+                #fff 5px,
+                #fff 10px
+            );
+        }
+
+        /* Countdown animation */
+        .countdown {
+            font-size: 8rem;
+            font-weight: bold;
+            color: #3b82f6;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            animation: countdownPulse 1s ease-in-out;
+        }
+
+        @keyframes countdownPulse {
+            0% { transform: scale(0.5); opacity: 0; }
+            50% { transform: scale(1.2); opacity: 1; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        /* Results animation */
+        .result-card {
+            animation: slideUp 0.5s ease-out;
+        }
+
+        @keyframes slideUp {
+            from { transform: translateY(20px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+
+        /* Gradient background */
+        .gradient-bg {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+
+        /* Stats panel */
+        .stat-card {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+    </style>
+</head>
+<body class="gradient-bg min-h-screen">
+    <div class="container mx-auto p-4 max-w-6xl">
+        <!-- Header -->
+        <div class="text-center mb-8">
+            <h1 class="text-5xl font-bold text-white mb-2">🏁 rracer</h1>
+            <p class="text-white/80 text-lg">Real-time multiplayer typing races</p>
+        </div>
+        
+        <!-- Connection Panel -->
+        <div class="stat-card rounded-xl shadow-xl p-6 mb-6">
+            <div class="flex gap-4 mb-4">
+                <input 
+                    type="text" 
+                    id="roomName" 
+                    placeholder="Room name" 
+                    value="main"
+                    class="border-2 border-gray-200 rounded-lg px-4 py-3 flex-1 focus:border-blue-500 focus:outline-none transition-colors"
+                />
+                <input 
+                    type="text" 
+                    id="playerName" 
+                    placeholder="Your name" 
+                    value="Player"
+                    class="border-2 border-gray-200 rounded-lg px-4 py-3 flex-1 focus:border-blue-500 focus:outline-none transition-colors"
+                />
+                <button 
+                    id="connectBtn"
+                    class="bg-blue-500 text-white px-6 py-3 rounded-lg hover:bg-blue-600 transition-colors font-semibold"
+                >
+                    Connect & Join
+                </button>
+            </div>
+            <div class="text-sm text-gray-600">
+                Status: <span id="status" class="font-semibold">Disconnected</span>
+            </div>
+        </div>
+
+        <!-- Countdown Overlay -->
+        <div id="countdownOverlay" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+            <div class="text-center">
+                <div id="countdownNumber" class="countdown">3</div>
+                <div class="text-white text-2xl mt-4">Get ready to race!</div>
+            </div>
+        </div>
+
+        <!-- Race Track -->
+        <div id="raceTrack" class="stat-card rounded-xl shadow-xl p-6 mb-6 hidden">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-2xl font-bold text-gray-800">🏁 Race in Progress</h2>
+                <div class="flex gap-6">
+                    <div class="text-center">
+                        <div id="raceWpm" class="text-3xl font-bold text-blue-600">0</div>
+                        <div class="text-sm text-gray-500">WPM</div>
+                    </div>
+                    <div class="text-center">
+                        <div id="raceAccuracy" class="text-3xl font-bold text-green-600">100%</div>
+                        <div class="text-sm text-gray-500">Accuracy</div>
+                    </div>
+                    <div class="text-center">
+                        <div id="raceTime" class="text-3xl font-bold text-purple-600">0s</div>
+                        <div class="text-sm text-gray-500">Time</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Race lanes -->
+            <div id="raceLanes" class="race-track mb-6" style="min-height: 240px;">
+                <div class="finish-line"></div>
+                <!-- Lanes will be dynamically added here -->
+            </div>
+            
+            <!-- Passage to type -->
+            <div class="mb-4">
+                <h3 class="text-lg font-semibold mb-2 text-gray-700">Type this passage:</h3>
+                <div 
+                    id="passageDisplay"
+                    class="text-xl font-mono leading-relaxed p-6 bg-white rounded-lg border-2 border-gray-200 typing-area min-h-[120px] passage-text"
+                    tabindex="0"
+                ></div>
+            </div>
+            
+            <!-- Progress info -->
+            <div class="flex justify-between text-sm text-gray-600 bg-gray-50 rounded-lg p-3">
+                <span>Progress: <span id="position" class="font-semibold">0</span> / <span id="totalChars" class="font-semibold">0</span> characters</span>
+                <span>Errors: <span id="errors" class="font-semibold text-red-600">0</span></span>
+                <span>Rank: <span id="currentRank" class="font-semibold text-blue-600">#1</span></span>
+            </div>
+        </div>
+
+        <!-- Waiting Room -->
+        <div id="waitingRoom" class="stat-card rounded-xl shadow-xl p-6 mb-6 hidden">
+            <div class="text-center">
+                <h2 class="text-2xl font-bold text-gray-800 mb-4">🏁 Waiting for Race</h2>
+                <div class="text-gray-600 mb-6">
+                    <p class="text-lg">Waiting for more players to join...</p>
+                    <p class="text-sm mt-2">Race starts immediately with 2+ players, or after timer expires</p>
+                    <div class="mt-4 p-4 bg-blue-50 rounded-lg">
+                        <p class="text-blue-800 font-semibold">Starting in: <span id="waitingTimer" class="text-2xl font-bold">10</span> seconds</p>
+                        <p class="text-blue-600 text-sm mt-1">Race will start automatically if no one else joins</p>
+                    </div>
+                </div>
+                
+                <!-- Players in room -->
+                <div id="playersInRoom" class="mb-6">
+                    <h3 class="text-lg font-semibold mb-3 text-gray-700">Players in Room:</h3>
+                    <div id="playersList" class="flex flex-wrap justify-center gap-3"></div>
+                </div>
+                
+                <div class="animate-pulse">
+                    <div class="inline-flex items-center text-blue-600">
+                        <svg class="animate-spin -ml-1 mr-3 h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        Waiting for players...
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Panel -->
+        <div id="resultsPanel" class="stat-card rounded-xl shadow-xl p-6 mb-6 hidden">
+            <div class="result-card">
+                <div class="text-center mb-6">
+                    <h2 class="text-3xl font-bold text-gray-800 mb-2">🏆 Race Complete!</h2>
+                    <div id="finalRank" class="text-xl text-gray-600"></div>
+                </div>
+                
+                <!-- Final stats -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                    <div class="text-center p-4 bg-blue-50 rounded-lg">
+                        <div id="finalWpm" class="text-4xl font-bold text-blue-600">0</div>
+                        <div class="text-gray-600">Words per Minute</div>
+                    </div>
+                    <div class="text-center p-4 bg-green-50 rounded-lg">
+                        <div id="finalAccuracy" class="text-4xl font-bold text-green-600">100%</div>
+                        <div class="text-gray-600">Accuracy</div>
+                    </div>
+                    <div class="text-center p-4 bg-purple-50 rounded-lg">
+                        <div id="finalTime" class="text-4xl font-bold text-purple-600">0s</div>
+                        <div class="text-gray-600">Total Time</div>
+                    </div>
+                </div>
+                
+                <!-- Leaderboard -->
+                <div id="leaderboard" class="mb-6">
+                    <h3 class="text-xl font-semibold mb-3 text-gray-700">Final Results:</h3>
+                    <div id="leaderboardList" class="space-y-2"></div>
+                </div>
+                
+                <div class="text-center">
+                    <button 
+                        id="resetBtn"
+                        class="bg-green-500 text-white px-8 py-3 rounded-lg hover:bg-green-600 transition-colors font-semibold text-lg"
+                    >
+                        🏁 Race Again
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Error Panel -->
+        <div id="errorPanel" class="bg-red-100 border-2 border-red-400 text-red-700 p-4 rounded-lg mb-6 hidden">
+            <div class="flex items-center">
+                <svg class="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
+                </svg>
+                <span id="errorMessage"></span>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="text-center text-white/60 text-sm mt-8">
+            <p>Built with ❤️ using Rust 🦀 + WebAssembly + WebSockets</p>
+            <p class="mt-1">Real-time multiplayer typing races in your browser</p>
+        </div>
+    </div>
+
+    <script>
+        class RracerClient {
+            constructor() {
+                this.ws = null;
+                this.gameState = 'waiting';
+                this.passage = '';
+                this.currentPosition = 0;
+                this.errors = 0;
+                this.startTime = null;
+                this.raceStartTime = null;
+                this.playerPositions = {};
+                this.players = [];
+                this.playerName = '';
+                this.leaderboard = [];
+                this.raceTimer = null;
+                this.progressUpdateTimer = null;
+                this.lastProgressSent = 0;
+                this.currentWpm = 0;
+                this.currentRawWpm = 0;
+                this.currentAccuracy = 100;
+                
+                this.setupEventListeners();
+            }
+
+            setupEventListeners() {
+                document.getElementById('connectBtn').addEventListener('click', () => this.connect());
+                document.getElementById('resetBtn').addEventListener('click', () => this.reset());
+                
+                // Global keydown handler for typing
+                document.addEventListener('keydown', (e) => {
+                    // Check if we're in the race track view and have a passage
+                    const raceTrack = document.getElementById('raceTrack');
+                    const passageDisplay = document.getElementById('passageDisplay');
+                    
+                    if (raceTrack && !raceTrack.classList.contains('hidden') && 
+                        passageDisplay && this.passage && 
+                        document.activeElement === passageDisplay) {
+                        this.handleKeydown(e);
+                    } else if (e.key === 'Enter' && !this.ws) {
+                        this.connect();
+                    }
+                });
+            }
+
+            connect() {
+                const host = window.location.host;
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = `${protocol}//${host}/ws`;
+                
+                console.log('Attempting to connect to:', wsUrl);
+                
+                try {
+                    this.ws = new WebSocket(wsUrl);
+                    
+                    this.ws.onopen = () => {
+                        console.log('Connected to WebSocket');
+                        this.updateStatus('Connected');
+                        this.joinRoom();
+                    };
+                    
+                    this.ws.onmessage = (event) => {
+                        console.log('Received message:', event.data);
+                        try {
+                            const msg = JSON.parse(event.data);
+                            this.handleMessage(msg);
+                        } catch (e) {
+                            console.error('Failed to parse message:', e, event.data);
+                        }
+                    };
+                    
+                    this.ws.onclose = (event) => {
+                        console.log('WebSocket disconnected:', event.code, event.reason);
+                        this.updateStatus('Disconnected');
+                        this.ws = null;
+                        this.hideAllPanels();
+                    };
+                    
+                    this.ws.onerror = (error) => {
+                        console.error('WebSocket error:', error);
+                        this.showError('Failed to connect to server');
+                    };
+                    
+                } catch (error) {
+                    console.error('Failed to create WebSocket:', error);
+                    this.showError('Failed to connect to server');
+                }
+            }
+
+            joinRoom() {
+                const roomName = document.getElementById('roomName').value || 'main';
+                this.playerName = document.getElementById('playerName').value || 'Player';
+                
+                this.sendMessage({
+                    Join: { room: roomName, name: this.playerName }
+                });
+            }
+
+            sendMessage(msg) {
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    const jsonMsg = JSON.stringify(msg);
+                    console.log('Sending message:', jsonMsg);
+                    this.ws.send(jsonMsg);
+                } else {
+                    console.error('WebSocket not connected, cannot send message:', msg);
+                    this.showError('Not connected to server');
+                }
+            }
+
+            handleMessage(msg) {
+                console.log('Received message:', msg);
+                
+                if (msg.Lobby) {
+                    this.players = msg.Lobby.players;
+                    this.updatePlayersList(msg.Lobby.players);
+                    this.showWaitingRoom();
+                } else if (msg.Start) {
+                    this.startRace(msg.Start.passage);
+                } else if (msg.Progress) {
+                    this.updatePlayerProgress(msg.Progress.id, msg.Progress.pos);
+                } else if (msg.Finish) {
+                    this.handlePlayerFinish(msg.Finish.id, msg.Finish.wpm, msg.Finish.accuracy);
+                } else if (msg.StateChange) {
+                    this.gameState = msg.StateChange.state;
+                    this.updateGameState();
+                } else if (msg.WaitingTimer) {
+                    this.updateWaitingTimer(msg.WaitingTimer.seconds_left);
+                } else if (msg.Error) {
+                    this.showError(msg.Error.message);
+                }
+            }
+
+            updateStatus(status) {
+                document.getElementById('status').textContent = status;
+            }
+
+            hideAllPanels() {
+                document.getElementById('waitingRoom').classList.add('hidden');
+                document.getElementById('raceTrack').classList.add('hidden');
+                document.getElementById('resultsPanel').classList.add('hidden');
+                document.getElementById('countdownOverlay').classList.add('hidden');
+            }
+
+            showWaitingRoom() {
+                console.log('Showing waiting room');
+                this.hideAllPanels();
+                document.getElementById('waitingRoom').classList.remove('hidden');
+                console.log('Waiting room should now be visible');
+            }
+
+            updatePlayersList(players) {
+                const playersList = document.getElementById('playersList');
+                playersList.innerHTML = '';
+                
+                players.forEach((player, index) => {
+                    const playerDiv = document.createElement('div');
+                    playerDiv.className = 'bg-gradient-to-r from-blue-500 to-purple-600 text-white px-4 py-2 rounded-full font-semibold shadow-lg';
+                    playerDiv.textContent = player;
+                    if (player === this.playerName) {
+                        playerDiv.classList.add('ring-2', 'ring-yellow-400');
+                        playerDiv.textContent += ' (You)';
+                    }
+                    playersList.appendChild(playerDiv);
+                });
+            }
+
+            startCountdown() {
+                const overlay = document.getElementById('countdownOverlay');
+                const number = document.getElementById('countdownNumber');
+                
+                overlay.classList.remove('hidden');
+                
+                let count = 3;
+                const countdownInterval = setInterval(() => {
+                    number.textContent = count;
+                    number.style.animation = 'none';
+                    setTimeout(() => {
+                        number.style.animation = 'countdownPulse 1s ease-in-out';
+                    }, 10);
+                    
+                    count--;
+                    if (count < 0) {
+                        clearInterval(countdownInterval);
+                        number.textContent = 'GO!';
+                        setTimeout(() => {
+                            overlay.classList.add('hidden');
+                        }, 1000);
+                    }
+                }, 1000);
+            }
+
+            startRace(passage) {
+                this.passage = passage;
+                this.currentPosition = 0;
+                this.errors = 0;
+                this.startTime = Date.now();
+                this.raceStartTime = Date.now();
+                this.playerPositions = {};
+                this.gameState = 'racing';
+                
+                console.log('Starting race with passage:', passage);
+                
+                this.hideAllPanels();
+                this.showRaceTrack();
+                this.setupRaceLanes();
+                this.updatePassageDisplay();
+                this.startRaceTimer();
+                
+                // Focus the passage display immediately
+                setTimeout(() => {
+                    const passageDisplay = document.getElementById('passageDisplay');
+                    passageDisplay.focus();
+                    console.log('Passage display focused, ready for typing');
+                }, 100);
+            }
+
+            showRaceTrack() {
+                document.getElementById('raceTrack').classList.remove('hidden');
+            }
+
+            setupRaceLanes() {
+                const raceLanes = document.getElementById('raceLanes');
+                raceLanes.innerHTML = '<div class="finish-line"></div>';
+                
+                const carColors = ['car-player', 'car-opponent1', 'car-opponent2', 'car-opponent3', 'car-opponent4'];
+                
+                this.players.forEach((player, index) => {
+                    const lane = document.createElement('div');
+                    lane.className = 'race-lane';
+                    lane.id = `lane-${index}`;
+                    
+                    const car = document.createElement('div');
+                    car.className = `car ${carColors[index % carColors.length]}`;
+                    car.id = `car-${player}`;
+                    car.textContent = player === this.playerName ? '🚗' : '🏎️';
+                    car.title = player;
+                    
+                    const nameLabel = document.createElement('div');
+                    nameLabel.className = 'absolute left-2 top-1 text-xs font-semibold text-gray-600';
+                    nameLabel.textContent = player === this.playerName ? `${player} (You)` : player;
+                    
+                    lane.appendChild(car);
+                    lane.appendChild(nameLabel);
+                    raceLanes.appendChild(lane);
+                });
+            }
+
+            startRaceTimer() {
+                this.raceTimer = setInterval(() => {
+                    if (this.raceStartTime) {
+                        const elapsed = Math.floor((Date.now() - this.raceStartTime) / 1000);
+                        document.getElementById('raceTime').textContent = `${elapsed}s`;
+                        
+                        // Update WPM continuously, even when not typing
+                        this.updateStats();
+                    }
+                }, 1000);
+                
+                // Send progress updates every 500ms to keep other players updated
+                this.progressUpdateTimer = setInterval(() => {
+                    if (this.currentPosition > 0 && this.ws && this.ws.readyState === WebSocket.OPEN && this.gameState === 'racing') {
+                        this.sendMessage({
+                            Progress: { pos: this.currentPosition, ts: Date.now() }
+                        });
+                    } else {
+                        console.log('Not sending progress:', {
+                            position: this.currentPosition,
+                            wsReady: this.ws && this.ws.readyState === WebSocket.OPEN,
+                            gameState: this.gameState
+                        });
+                    }
+                }, 500);
+            }
+
+            updatePassageDisplay() {
+                const display = document.getElementById('passageDisplay');
+                const chars = this.passage.split('');
+                
+                let html = '';
+                chars.forEach((char, index) => {
+                    if (index < this.currentPosition) {
+                        html += `<span class="correct-char">${char}</span>`;
+                    } else if (index === this.currentPosition) {
+                        html += `<span class="current-char">${char}</span>`;
+                    } else {
+                        html += char;
+                    }
+                });
+                
+                display.innerHTML = html;
+                
+                document.getElementById('position').textContent = this.currentPosition;
+                document.getElementById('totalChars').textContent = this.passage.length;
+                document.getElementById('errors').textContent = this.errors;
+                
+                this.updateStats();
+            }
+
+            updateStats() {
+                if (this.startTime) {
+                    const elapsedSeconds = (Date.now() - this.startTime) / 1000;
+                    
+                    // Don't calculate WPM for very short durations to avoid wild fluctuations
+                    if (elapsedSeconds < 1.0) {
+                        document.getElementById('raceWpm').textContent = '0';
+                        document.getElementById('raceAccuracy').textContent = '100%';
+                        return;
+                    }
+                    
+                    // Monkeytype WPM calculation:
+                    // WPM = (correct characters / 5) * (60 / elapsed seconds)
+                    // This gives words per minute based only on correct characters
+                    const wpm = (this.currentPosition / 5) * (60 / elapsedSeconds);
+                    
+                    // Raw WPM = (all characters attempted / 5) * (60 / elapsed seconds)
+                    // This includes both correct and incorrect characters
+                    const totalCharactersAttempted = this.currentPosition + this.errors;
+                    const rawWpm = (totalCharactersAttempted / 5) * (60 / elapsedSeconds);
+                    
+                    // Accuracy = (correct characters / total characters attempted) * 100
+                    const accuracy = totalCharactersAttempted > 0 ? (this.currentPosition / totalCharactersAttempted) * 100 : 100;
+                    
+                    // Debug logging
+                    console.log(`WPM Debug: pos=${this.currentPosition}, errors=${this.errors}, elapsed=${elapsedSeconds.toFixed(2)}s, wpm=${wpm.toFixed(1)}, accuracy=${accuracy.toFixed(1)}%`);
+                    
+                    // Display WPM (not raw WPM) - this is the effective typing speed
+                    document.getElementById('raceWpm').textContent = Math.round(Math.max(0, wpm));
+                    document.getElementById('raceAccuracy').textContent = `${Math.round(accuracy)}%`;
+                    
+                    // Store both for potential future use
+                    this.currentWpm = wpm;
+                    this.currentRawWpm = rawWpm;
+                    this.currentAccuracy = accuracy;
+                    
+                    this.updateRank();
+                }
+            }
+
+            updateRank() {
+                const sortedPlayers = Object.entries(this.playerPositions)
+                    .sort(([,a], [,b]) => b - a);
+                
+                const myRank = sortedPlayers.findIndex(([name]) => name === this.playerName) + 1;
+                document.getElementById('currentRank').textContent = `#${myRank || 1}`;
+            }
+
+            handleKeydown(event) {
+                // Allow typing if we have a passage, regardless of game state
+                if (!this.passage || this.currentPosition >= this.passage.length) {
+                    return;
+                }
+                
+                const key = event.key;
+                if (key.length !== 1 && key !== ' ') return; // Only single characters and space
+                
+                event.preventDefault();
+                
+                const expectedChar = this.passage[this.currentPosition];
+                console.log(`Expected: "${expectedChar}", Got: "${key}"`);
+                
+                if (key === expectedChar) {
+                    this.currentPosition++;
+                    
+                    // Send progress update immediately for correct keystrokes
+                    // But throttle to avoid spam (max once per 100ms)
+                    const now = Date.now();
+                    if (now - this.lastProgressSent > 100) {
+                        this.sendMessage({
+                            Key: { ch: key, ts: now }
+                        });
+                        this.lastProgressSent = now;
+                    }
+                    
+                    // Check if race is finished
+                    if (this.currentPosition >= this.passage.length) {
+                        this.finishRace();
+                    }
+                } else {
+                    this.errors++;
+                }
+                
+                this.updatePassageDisplay();
+                this.updateCarPosition(this.playerName, this.currentPosition);
+            }
+
+            updatePlayerProgress(playerId, position) {
+                this.playerPositions[playerId] = position;
+                this.updateCarPosition(playerId, position);
+            }
+
+            updateCarPosition(playerId, position) {
+                const car = document.getElementById(`car-${playerId}`);
+                if (car && this.passage.length > 0) {
+                    const progress = position / this.passage.length;
+                    const maxDistance = car.parentElement.offsetWidth - 60; // Account for car width and finish line
+                    const newPosition = Math.min(progress * maxDistance, maxDistance);
+                    car.style.transform = `translateX(${newPosition}px)`;
+                }
+            }
+
+            handlePlayerFinish(playerId, wpm, accuracy) {
+                console.log(`Player ${playerId} finished with ${wpm} WPM, ${accuracy}% accuracy`);
+                
+                this.leaderboard.push({
+                    name: playerId,
+                    wpm: wpm,
+                    accuracy: accuracy,
+                    finishTime: Date.now()
+                });
+                
+                // Sort leaderboard by finish time
+                this.leaderboard.sort((a, b) => a.finishTime - b.finishTime);
+                
+                // If this is the current player, stop sending progress updates
+                console.log('Player finished:', playerId, 'Current player:', this.playerName);
+                if (playerId === this.playerName) {
+                    console.log('Current player finished, stopping progress timer');
+                    if (this.progressUpdateTimer) {
+                        clearInterval(this.progressUpdateTimer);
+                        this.progressUpdateTimer = null;
+                        console.log('Progress timer cleared');
+                    }
+                }
+            }
+
+            finishRace() {
+                if (this.raceTimer) {
+                    clearInterval(this.raceTimer);
+                    this.raceTimer = null;
+                }
+                
+                if (this.progressUpdateTimer) {
+                    clearInterval(this.progressUpdateTimer);
+                    this.progressUpdateTimer = null;
+                }
+                
+                const elapsedSeconds = (Date.now() - this.startTime) / 1000;
+                
+                // Final Monkeytype-style calculations
+                const finalWpm = elapsedSeconds > 1.0 ? (this.currentPosition / 5) * (60 / elapsedSeconds) : 0;
+                const totalAttempted = this.currentPosition + this.errors;
+                const finalAccuracy = totalAttempted > 0 ? (this.currentPosition / totalAttempted) * 100 : 100;
+                const finalRawWpm = elapsedSeconds > 1.0 ? (totalAttempted / 5) * (60 / elapsedSeconds) : 0;
+                
+                console.log(`Race finished: ${Math.round(finalWpm)} WPM, ${Math.round(finalAccuracy)}% accuracy, ${Math.round(finalRawWpm)} raw WPM`);
+                
+                // Send final completion message
+                this.sendMessage({
+                    Finish: { 
+                        wpm: finalWpm, 
+                        accuracy: finalAccuracy, 
+                        time: elapsedSeconds,
+                        ts: Date.now() 
+                    }
+                });
+                
+                // Update final stats display
+                document.getElementById('finalWpm').textContent = Math.round(finalWpm);
+                document.getElementById('finalAccuracy').textContent = `${Math.round(finalAccuracy)}%`;
+                document.getElementById('finalTime').textContent = `${Math.round(elapsedSeconds)}s`;
+            }
+
+            updateGameState() {
+                if (this.gameState === 'finished') {
+                    setTimeout(() => {
+                        this.showResults();
+                    }, 2000);
+                } else if (this.gameState === 'waiting') {
+                    this.hideAllPanels();
+                    this.resetRaceState();
+                    this.showWaitingRoom();
+                } else if (this.gameState === 'countdown') {
+                    // Countdown will be handled by the Start message
+                }
+            }
+
+            showResults() {
+                this.hideAllPanels();
+                document.getElementById('resultsPanel').classList.remove('hidden');
+                
+                // Update final rank
+                const myRank = this.leaderboard.findIndex(p => p.name === this.playerName) + 1;
+                document.getElementById('finalRank').textContent = 
+                    myRank > 0 ? `You finished #${myRank} out of ${this.players.length} players!` : 
+                    'Race completed!';
+                
+                // Update leaderboard
+                this.updateLeaderboard();
+            }
+
+            updateLeaderboard() {
+                const leaderboardList = document.getElementById('leaderboardList');
+                leaderboardList.innerHTML = '';
+                
+                this.leaderboard.forEach((player, index) => {
+                    const item = document.createElement('div');
+                    item.className = `flex justify-between items-center p-3 rounded-lg ${
+                        player.name === this.playerName ? 'bg-blue-50 border-2 border-blue-200' : 'bg-gray-50'
+                    }`;
+                    
+                    item.innerHTML = `
+                        <div class="flex items-center">
+                            <span class="text-lg font-bold text-gray-600 mr-3">#${index + 1}</span>
+                            <span class="font-semibold ${player.name === this.playerName ? 'text-blue-600' : 'text-gray-800'}">
+                                ${player.name}${player.name === this.playerName ? ' (You)' : ''}
+                            </span>
+                        </div>
+                        <div class="flex gap-4 text-sm">
+                            <span class="text-blue-600 font-semibold">${Math.round(player.wpm)} WPM</span>
+                            <span class="text-green-600 font-semibold">${Math.round(player.accuracy)}%</span>
+                        </div>
+                    `;
+                    
+                    leaderboardList.appendChild(item);
+                });
+            }
+
+            resetRaceState() {
+                // Reset all race-related state
+                this.currentPosition = 0;
+                this.errors = 0;
+                this.passage = '';
+                this.playerPositions = {};
+                this.leaderboard = [];
+                this.startTime = null;
+                this.raceStartTime = null;
+                this.lastProgressSent = 0;
+                this.currentWpm = 0;
+                this.currentRawWpm = 0;
+                this.currentAccuracy = 100;
+                
+                // Clear all timers
+                if (this.raceTimer) {
+                    clearInterval(this.raceTimer);
+                    this.raceTimer = null;
+                }
+                if (this.progressUpdateTimer) {
+                    clearInterval(this.progressUpdateTimer);
+                    this.progressUpdateTimer = null;
+                }
+                
+                // Reset UI elements
+                document.getElementById('raceWpm').textContent = '0';
+                document.getElementById('raceAccuracy').textContent = '100%';
+                document.getElementById('raceTime').textContent = '0s';
+                document.getElementById('position').textContent = '0';
+                document.getElementById('errors').textContent = '0';
+                document.getElementById('currentRank').textContent = '#1';
+                
+                console.log('Race state reset');
+            }
+
+            reset() {
+                console.log('Reset button clicked');
+                this.sendMessage('Reset');
+                console.log('Sent reset message to server');
+            }
+
+            updateWaitingTimer(secondsLeft) {
+                console.log('Updating waiting timer:', secondsLeft);
+                console.log('Waiting room visible:', !document.getElementById('waitingRoom').classList.contains('hidden'));
+                const timerElement = document.getElementById('waitingTimer');
+                console.log('Timer element found:', !!timerElement);
+                if (timerElement) {
+                    console.log('Setting timer text to:', secondsLeft);
+                    timerElement.textContent = secondsLeft;
+                    
+                    // Add visual feedback when timer is low
+                    if (secondsLeft <= 3) {
+                        timerElement.classList.add('text-red-600');
+                        timerElement.classList.remove('text-blue-800');
+                    } else {
+                        timerElement.classList.add('text-blue-800');
+                        timerElement.classList.remove('text-red-600');
+                    }
+                } else {
+                    console.error('waitingTimer element not found!');
+                }
+            }
+
+            showError(message) {
+                document.getElementById('errorMessage').textContent = message;
+                document.getElementById('errorPanel').classList.remove('hidden');
+                setTimeout(() => {
+                    document.getElementById('errorPanel').classList.add('hidden');
+                }, 5000);
+            }
+        }
+
+        // Initialize the client when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            new RracerClient();
+        });
+    </script>
+</body>
+</html>

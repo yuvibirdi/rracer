@@ -1,84 +1,124 @@
-use leptos::*;
+use leptos::prelude::*;
 use shared::protocol::{ClientMsg, ServerMsg};
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::spawn_local;
-use web_sys::{MessageEvent, WebSocket};
-
-use crate::websocket::WebSocketManager;
+use wasm_bindgen::JsCast;
+use web_sys::WebSocket;
 
 #[component]
 pub fn App() -> impl IntoView {
-    let (game_state, set_game_state) = create_signal("waiting".to_string());
-    let (players, set_players) = create_signal(Vec::<String>::new());
-    let (passage, set_passage) = create_signal(String::new());
-    let (player_positions, set_player_positions) = create_signal(HashMap::<String, usize>::new());
-    let (current_position, set_current_position) = create_signal(0usize);
-    let (errors, set_errors) = create_signal(0usize);
-    let (start_time, set_start_time) = create_signal(None::<f64>);
-    let (room_name, set_room_name) = create_signal("main".to_string());
-    let (player_name, set_player_name) = create_signal("Player".to_string());
-    let (ws_manager, set_ws_manager) = create_signal(None::<WebSocketManager>);
-    let (connected, set_connected) = create_signal(false);
+    let (game_state, set_game_state) = signal("waiting".to_string());
+    let (players, set_players) = signal(Vec::<String>::new());
+    let (passage, set_passage) = signal(String::new());
+    let (player_positions, set_player_positions) = signal(HashMap::<String, usize>::new());
+    let (current_position, set_current_position) = signal(0usize);
+    let (errors, set_errors) = signal(0usize);
+    let (start_time, set_start_time) = signal(None::<f64>);
+    let (room_name, set_room_name) = signal("main".to_string());
+    let (player_name, set_player_name) = signal("Player".to_string());
+    let (connected, set_connected) = signal(false);
+    let (error_message, set_error_message) = signal(None::<String>);
+    let (wpm, set_wpm) = signal(0.0);
+    let (accuracy, set_accuracy) = signal(100.0);
+    
+    // Simple WebSocket state
+    let ws_ref = std::rc::Rc::new(std::cell::RefCell::new(None::<WebSocket>));
 
-    let connect_websocket = move || {
-        let host = web_sys::window()
-            .unwrap()
-            .location()
-            .host()
-            .unwrap();
-        let ws_url = format!("ws://{}/ws", host);
-        
-        match WebSocketManager::new(&ws_url) {
-            Ok(manager) => {
-                let manager_clone = manager.clone();
-                
-                // Set up message handler
-                manager.set_message_handler(move |msg: ServerMsg| {
-                    match msg {
-                        ServerMsg::Lobby { players: p } => {
-                            set_players.set(p);
-                        }
-                        ServerMsg::Start { passage: p, t0: _ } => {
-                            set_passage.set(p);
-                            set_game_state.set("racing".to_string());
-                            set_start_time.set(Some(js_sys::Date::now()));
-                            set_current_position.set(0);
-                            set_errors.set(0);
-                        }
-                        ServerMsg::Progress { id, pos } => {
-                            set_player_positions.update(|positions| {
-                                positions.insert(id, pos);
-                            });
-                        }
-                        ServerMsg::Finish { id, wpm, accuracy } => {
-                            web_sys::console::log_1(&format!("Player {} finished with {} WPM, {}% accuracy", id, wpm, accuracy).into());
-                        }
-                        ServerMsg::StateChange { state } => {
-                            set_game_state.set(state);
-                        }
-                        ServerMsg::Error { message } => {
-                            web_sys::console::error_1(&message.into());
-                        }
-                    }
-                });
-                
-                set_ws_manager.set(Some(manager_clone));
-                set_connected.set(true);
-            }
-            Err(e) => {
-                web_sys::console::error_1(&format!("Failed to connect: {}", e).into());
+    let connect_websocket = {
+        let ws_ref = ws_ref.clone();
+        move || {
+            let host = web_sys::window()
+                .unwrap()
+                .location()
+                .host()
+                .unwrap();
+            let ws_url = format!("ws://{}/ws", host);
+            
+            match WebSocket::new(&ws_url) {
+                Ok(ws) => {
+                    // Set up message handler
+                    let onmessage_callback = {
+                        let set_players = set_players.clone();
+                        let set_passage = set_passage.clone();
+                        let set_game_state = set_game_state.clone();
+                        let set_start_time = set_start_time.clone();
+                        let set_current_position = set_current_position.clone();
+                        let set_errors = set_errors.clone();
+                        let set_player_positions = set_player_positions.clone();
+                        let set_wpm = set_wpm.clone();
+                        let set_accuracy = set_accuracy.clone();
+                        let set_error_message = set_error_message.clone();
+                        
+                        Closure::wrap(Box::new(move |e: web_sys::MessageEvent| {
+                            if let Ok(text) = e.data().dyn_into::<js_sys::JsString>() {
+                                let text: String = text.into();
+                                if let Ok(msg) = serde_json::from_str::<ServerMsg>(&text) {
+                                    match msg {
+                                        ServerMsg::Lobby { players: p } => {
+                                            set_players.set(p);
+                                        }
+                                        ServerMsg::Start { passage: p, t0: _ } => {
+                                            set_passage.set(p);
+                                            set_game_state.set("racing".to_string());
+                                            set_start_time.set(Some(js_sys::Date::now()));
+                                            set_current_position.set(0);
+                                            set_errors.set(0);
+                                        }
+                                        ServerMsg::Progress { id, pos } => {
+                                            set_player_positions.update(|positions| {
+                                                positions.insert(id, pos);
+                                            });
+                                        }
+                                        ServerMsg::Finish { id, wpm: player_wpm, accuracy: player_accuracy } => {
+                                            web_sys::console::log_1(&format!("Player {} finished with {} WPM, {}% accuracy", id, player_wpm, player_accuracy).into());
+                                            set_wpm.set(player_wpm);
+                                            set_accuracy.set(player_accuracy);
+                                        }
+                                        ServerMsg::StateChange { state } => {
+                                            set_game_state.set(state);
+                                            if state == "waiting" {
+                                                set_current_position.set(0);
+                                                set_errors.set(0);
+                                                set_wpm.set(0.0);
+                                                set_accuracy.set(100.0);
+                                                set_error_message.set(None);
+                                            }
+                                        }
+                                        ServerMsg::Error { message } => {
+                                            set_error_message.set(Some(message.clone()));
+                                            web_sys::console::error_1(&message.into());
+                                        }
+                                    }
+                                }
+                            }
+                        }) as Box<dyn FnMut(_)>)
+                    };
+                    
+                    ws.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
+                    onmessage_callback.forget();
+                    
+                    *ws_ref.borrow_mut() = Some(ws);
+                    set_connected.set(true);
+                }
+                Err(_) => {
+                    web_sys::console::error_1(&"Failed to connect to WebSocket".into());
+                }
             }
         }
     };
 
-    let join_room = move || {
-        if let Some(ws) = ws_manager.get() {
-            let msg = ClientMsg::Join {
-                room: room_name.get(),
-                name: player_name.get(),
-            };
-            ws.send_message(msg);
+    let join_room = {
+        let ws_ref = ws_ref.clone();
+        move || {
+            if let Some(ws) = ws_ref.borrow().as_ref() {
+                let msg = ClientMsg::Join {
+                    room: room_name.get(),
+                    name: player_name.get(),
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = ws.send_with_str(&json);
+                }
+            }
         }
     };
 
@@ -94,23 +134,53 @@ pub fn App() -> impl IntoView {
                 if ch == expected_char {
                     set_current_position.update(|pos| *pos += 1);
                     
-                    if let Some(ws) = ws_manager.get() {
+                    // Calculate real-time WPM
+                    if let Some(start) = start_time.get() {
+                        let elapsed = (js_sys::Date::now() - start) / 1000.0; // seconds
+                        if elapsed > 0.0 {
+                            let chars_typed = current_position.get() + 1;
+                            let gross_wpm = (chars_typed as f64 / 5.0) / (elapsed / 60.0);
+                            let net_wpm = gross_wpm - (errors.get() as f64 * 60.0 / elapsed);
+                            set_wpm.set(net_wpm.max(0.0));
+                            
+                            let total_chars = chars_typed + errors.get();
+                            if total_chars > 0 {
+                                set_accuracy.set((chars_typed as f64 / total_chars as f64) * 100.0);
+                            }
+                        }
+                    }
+                    
+                    if let Some(ws) = ws_ref.borrow().as_ref() {
                         let msg = ClientMsg::Key {
                             ch,
                             ts: js_sys::Date::now() as u64,
                         };
-                        ws.send_message(msg);
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = ws.send_with_str(&json);
+                        }
                     }
                 } else {
                     set_errors.update(|e| *e += 1);
+                    
+                    // Update accuracy on error
+                    let total_chars = current_position.get() + errors.get();
+                    if total_chars > 0 {
+                        set_accuracy.set((current_position.get() as f64 / total_chars as f64) * 100.0);
+                    }
                 }
             }
         }
     };
 
-    let reset_game = move || {
-        if let Some(ws) = ws_manager.get() {
-            ws.send_message(ClientMsg::Reset);
+    let reset_game = {
+        let ws_ref = ws_ref.clone();
+        move || {
+            if let Some(ws) = ws_ref.borrow().as_ref() {
+                let msg = ClientMsg::Reset;
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = ws.send_with_str(&json);
+                }
+            }
         }
     };
 
@@ -176,14 +246,33 @@ pub fn App() -> impl IntoView {
 
                 <Show when=move || !passage.get().is_empty()>
                     <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
-                        <h2 class="text-xl font-semibold mb-4">"Type this passage:"</h2>
+                        <div class="flex justify-between items-center mb-4">
+                            <h2 class="text-xl font-semibold">"Type this passage:"</h2>
+                            <div class="flex gap-4 text-sm">
+                                <div class="text-center">
+                                    <div class="font-bold text-lg text-blue-600">{move || format!("{:.0}", wpm.get())}</div>
+                                    <div class="text-gray-500">"WPM"</div>
+                                </div>
+                                <div class="text-center">
+                                    <div class="font-bold text-lg text-green-600">{move || format!("{:.1}%", accuracy.get())}</div>
+                                    <div class="text-gray-500">"Accuracy"</div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <Show when=move || error_message.get().is_some()>
+                            <div class="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded">
+                                {move || error_message.get().unwrap_or_default()}
+                            </div>
+                        </Show>
+                        
                         <div 
-                            class="text-lg font-mono leading-relaxed p-4 bg-gray-50 rounded border-2 border-gray-200 focus-within:border-blue-500"
+                            class="text-lg font-mono leading-relaxed p-4 bg-gray-50 rounded border-2 border-gray-200 focus-within:border-blue-500 typing-area"
                             tabindex="0"
                             on:keydown=handle_keydown
                         >
-                            <span class="bg-green-200">{move || passage.get().chars().take(current_position.get()).collect::<String>()}</span>
-                            <span class="bg-blue-200">{move || passage.get().chars().nth(current_position.get()).unwrap_or(' ')}</span>
+                            <span class="correct-char">{move || passage.get().chars().take(current_position.get()).collect::<String>()}</span>
+                            <span class="current-char">{move || passage.get().chars().nth(current_position.get()).unwrap_or(' ')}</span>
                             <span>{move || passage.get().chars().skip(current_position.get() + 1).collect::<String>()}</span>
                         </div>
                         <div class="mt-4 flex justify-between text-sm text-gray-600">

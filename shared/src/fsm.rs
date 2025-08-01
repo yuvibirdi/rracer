@@ -1,6 +1,6 @@
 use rust_fsm::*;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RracerState {
     Waiting,
     Countdown,
@@ -8,7 +8,7 @@ pub enum RracerState {
     Finished,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RracerEvent {
     Join,
     CountdownElapsed,
@@ -16,9 +16,17 @@ pub enum RracerEvent {
     Reset,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RracerOutput {
+    None,
+}
+
 impl StateMachineImpl for RracerState {
     type Input = RracerEvent;
     type State = RracerState;
+    type Output = RracerOutput;
+    
+    const INITIAL_STATE: Self::State = RracerState::Waiting;
     
     fn transition(state: &Self::State, input: &Self::Input) -> Option<Self::State> {
         match (state, input) {
@@ -29,10 +37,14 @@ impl StateMachineImpl for RracerState {
             _ => None,
         }
     }
+    
+    fn output(_state: &Self::State, _input: &Self::Input) -> Option<Self::Output> {
+        Some(RracerOutput::None)
+    }
 }
 
 impl Default for RracerState {
     fn default() -> Self {
-        RracerState::Waiting
+        Self::INITIAL_STATE
     }
 }
