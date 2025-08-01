@@ -1,35 +1,24 @@
 # Multi-stage build for rracer
 FROM rust:1.75 as builder
 
-# Install wasm-pack and trunk for building the web client
-RUN cargo install trunk wasm-bindgen-cli
-RUN rustup target add wasm32-unknown-unknown
-
 WORKDIR /app
 COPY . .
 
-# Build the web client
-WORKDIR /app/web
-RUN trunk build --release
-
 # Build the server
-WORKDIR /app
 RUN cargo build --release --bin server
 
 # Final stage - minimal image
-FROM debian:bookworm-slim
+FROM alpine:latest
 
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk --no-cache add ca-certificates
 
 WORKDIR /app
 
 # Copy the server binary
 COPY --from=builder /app/target/release/server /app/server
 
-# Copy the web client dist
-COPY --from=builder /app/web/dist /app/web/dist
+# Copy the static web files
+COPY --from=builder /app/web/static /app/web/static
 
 EXPOSE 3000
 
