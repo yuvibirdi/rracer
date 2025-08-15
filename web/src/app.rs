@@ -4,6 +4,13 @@ use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::WebSocket;
+use std::cell::RefCell;
+
+// Thread-local storage for the active WebSocket. This avoids capturing non-Send/Sync
+// types inside Leptos children closures, which require Fn + Send + Sync.
+thread_local! {
+    static WS_REF: RefCell<Option<WebSocket>> = RefCell::new(None);
+}
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -21,11 +28,9 @@ pub fn App() -> impl IntoView {
     let (wpm, set_wpm) = signal(0.0);
     let (accuracy, set_accuracy) = signal(100.0);
     
-    // Simple WebSocket state
-    let ws_ref = std::rc::Rc::new(std::cell::RefCell::new(None::<WebSocket>));
+    // WebSocket is managed via thread-local storage (WS_REF)
 
     let connect_websocket = {
-        let ws_ref = ws_ref.clone();
         move || {
             let host = web_sys::window()
                 .unwrap()
@@ -75,8 +80,9 @@ pub fn App() -> impl IntoView {
                                             set_accuracy.set(player_accuracy);
                                         }
                                         ServerMsg::StateChange { state } => {
+                                            let is_waiting = state == "waiting";
                                             set_game_state.set(state);
-                                            if state == "waiting" {
+                                            if is_waiting {
                                                 set_current_position.set(0);
                                                 set_errors.set(0);
                                                 set_wpm.set(0.0);
@@ -84,6 +90,10 @@ pub fn App() -> impl IntoView {
                                                 set_error_message.set(None);
                                             }
                                         }
+                                         ServerMsg::WaitingTimer { seconds_left } => {
+                                             // Optional: could expose a signal to show countdown in UI.
+                                             web_sys::console::log_1(&format!("Waiting... {}s", seconds_left).into());
+                                         }
                                         ServerMsg::Error { message } => {
                                             set_error_message.set(Some(message.clone()));
                                             web_sys::console::error_1(&message.into());
@@ -97,7 +107,9 @@ pub fn App() -> impl IntoView {
                     ws.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
                     onmessage_callback.forget();
                     
-                    *ws_ref.borrow_mut() = Some(ws);
+                    WS_REF.with(|cell| {
+                        *cell.borrow_mut() = Some(ws);
+                    });
                     set_connected.set(true);
                 }
                 Err(_) => {
@@ -108,79 +120,18 @@ pub fn App() -> impl IntoView {
     };
 
     let join_room = {
-        let ws_ref = ws_ref.clone();
         move || {
-            if let Some(ws) = ws_ref.borrow().as_ref() {
-                let msg = ClientMsg::Join {
-                    room: room_name.get(),
-                    name: player_name.get(),
-                };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = ws.send_with_str(&json);
-                }
-            }
-        }
-    };
-
-    let handle_keydown = move |ev: web_sys::KeyboardEvent| {
-        if game_state.get() != "racing" {
-            return;
-        }
-
-        let key = ev.key();
-        if let Some(ch) = key.chars().next() {
-            let passage_text = passage.get();
-            if let Some(expected_char) = passage_text.chars().nth(current_position.get()) {
-                if ch == expected_char {
-                    set_current_position.update(|pos| *pos += 1);
-                    
-                    // Calculate real-time WPM
-                    if let Some(start) = start_time.get() {
-                        let elapsed = (js_sys::Date::now() - start) / 1000.0; // seconds
-                        if elapsed > 0.0 {
-                            let chars_typed = current_position.get() + 1;
-                            let gross_wpm = (chars_typed as f64 / 5.0) / (elapsed / 60.0);
-                            let net_wpm = gross_wpm - (errors.get() as f64 * 60.0 / elapsed);
-                            set_wpm.set(net_wpm.max(0.0));
-                            
-                            let total_chars = chars_typed + errors.get();
-                            if total_chars > 0 {
-                                set_accuracy.set((chars_typed as f64 / total_chars as f64) * 100.0);
-                            }
-                        }
-                    }
-                    
-                    if let Some(ws) = ws_ref.borrow().as_ref() {
-                        let msg = ClientMsg::Key {
-                            ch,
-                            ts: js_sys::Date::now() as u64,
-                        };
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            let _ = ws.send_with_str(&json);
-                        }
-                    }
-                } else {
-                    set_errors.update(|e| *e += 1);
-                    
-                    // Update accuracy on error
-                    let total_chars = current_position.get() + errors.get();
-                    if total_chars > 0 {
-                        set_accuracy.set((current_position.get() as f64 / total_chars as f64) * 100.0);
+            WS_REF.with(|cell| {
+                if let Some(ws) = cell.borrow().as_ref() {
+                    let msg = ClientMsg::Join {
+                        room: room_name.get(),
+                        name: player_name.get(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = ws.send_with_str(&json);
                     }
                 }
-            }
-        }
-    };
-
-    let reset_game = {
-        let ws_ref = ws_ref.clone();
-        move || {
-            if let Some(ws) = ws_ref.borrow().as_ref() {
-                let msg = ClientMsg::Reset;
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = ws.send_with_str(&json);
-                }
-            }
+            });
         }
     };
 
@@ -269,7 +220,57 @@ pub fn App() -> impl IntoView {
                         <div 
                             class="text-lg font-mono leading-relaxed p-4 bg-gray-50 rounded border-2 border-gray-200 focus-within:border-blue-500 typing-area"
                             tabindex="0"
-                            on:keydown=handle_keydown
+                            on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                if game_state.get() != "racing" {
+                                    return;
+                                }
+
+                                let key = ev.key();
+                                if let Some(ch) = key.chars().next() {
+                                    let passage_text = passage.get();
+                                    if let Some(expected_char) = passage_text.chars().nth(current_position.get()) {
+                                        if ch == expected_char {
+                                            set_current_position.update(|pos| *pos += 1);
+
+                                            // Calculate real-time WPM
+                                            if let Some(start) = start_time.get() {
+                                                let elapsed = (js_sys::Date::now() - start) / 1000.0; // seconds
+                                                if elapsed > 0.0 {
+                                                    let chars_typed = current_position.get() + 1;
+                                                    let gross_wpm = (chars_typed as f64 / 5.0) / (elapsed / 60.0);
+                                                    let net_wpm = gross_wpm - (errors.get() as f64 * 60.0 / elapsed);
+                                                    set_wpm.set(net_wpm.max(0.0));
+
+                                                    let total_chars = chars_typed + errors.get();
+                                                    if total_chars > 0 {
+                                                        set_accuracy.set((chars_typed as f64 / total_chars as f64) * 100.0);
+                                                    }
+                                                }
+                                            }
+
+                                            WS_REF.with(|cell| {
+                                                if let Some(ws) = cell.borrow().as_ref() {
+                                                    let msg = ClientMsg::Key {
+                                                        ch,
+                                                        ts: js_sys::Date::now() as u64,
+                                                    };
+                                                    if let Ok(json) = serde_json::to_string(&msg) {
+                                                        let _ = ws.send_with_str(&json);
+                                                    }
+                                                }
+                                            });
+                                        } else {
+                                            set_errors.update(|e| *e += 1);
+
+                                            // Update accuracy on error
+                                            let total_chars = current_position.get() + errors.get();
+                                            if total_chars > 0 {
+                                                set_accuracy.set((current_position.get() as f64 / total_chars as f64) * 100.0);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         >
                             <span class="correct-char">{move || passage.get().chars().take(current_position.get()).collect::<String>()}</span>
                             <span class="current-char">{move || passage.get().chars().nth(current_position.get()).unwrap_or(' ')}</span>
@@ -287,7 +288,16 @@ pub fn App() -> impl IntoView {
                         <h2 class="text-xl font-semibold mb-4">"Race Finished!"</h2>
                         <button
                             class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600"
-                            on:click=move |_| reset_game()
+                            on:click=move |_| {
+                                WS_REF.with(|cell| {
+                                    if let Some(ws) = cell.borrow().as_ref() {
+                                        let msg = ClientMsg::Reset;
+                                        if let Ok(json) = serde_json::to_string(&msg) {
+                                            let _ = ws.send_with_str(&json);
+                                        }
+                                    }
+                                });
+                            }
                         >
                             "Start New Race"
                         </button>

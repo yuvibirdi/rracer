@@ -23,7 +23,7 @@ impl WebSocketManager {
         };
 
         // Set up event handlers
-        let ws_clone = ws.clone();
+    let _ws_clone = ws.clone();
         let message_handler_clone = message_handler.clone();
         
         let onmessage_callback = Closure::wrap(Box::new(move |e: MessageEvent| {
