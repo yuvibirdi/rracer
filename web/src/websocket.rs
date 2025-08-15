@@ -5,12 +5,16 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{MessageEvent, WebSocket};
 
+// This optional helper isn't wired into the app yet.
+// Allow dead_code to keep the file around without warnings until it's integrated.
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct WebSocketManager {
     ws: Rc<WebSocket>,
     message_handler: Rc<RefCell<Option<Box<dyn Fn(ServerMsg)>>>>,
 }
 
+#[allow(dead_code)]
 impl WebSocketManager {
     pub fn new(url: &str) -> Result<Self, JsValue> {
         let ws = WebSocket::new(url)?;
@@ -64,6 +68,7 @@ impl WebSocketManager {
         Ok(manager)
     }
 
+    #[allow(dead_code)]
     pub fn set_message_handler<F>(&self, handler: F)
     where
         F: Fn(ServerMsg) + 'static,
@@ -71,6 +76,7 @@ impl WebSocketManager {
         *self.message_handler.borrow_mut() = Some(Box::new(handler));
     }
 
+    #[allow(dead_code)]
     pub fn send_message(&self, msg: ClientMsg) {
         if let Ok(json) = serde_json::to_string(&msg) {
             let _ = self.ws.send_with_str(&json);

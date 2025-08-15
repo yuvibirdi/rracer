@@ -380,7 +380,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
-        .nest_service("/", ServeDir::new("../web/static"))
+        // Serve static files from the workspace's web/static directory
+        // Using a relative path from the current working directory (workspace root when using `cargo run`)
+        .nest_service("/", ServeDir::new("web/static"))
         .layer(CorsLayer::permissive())
         .with_state(rooms);
 

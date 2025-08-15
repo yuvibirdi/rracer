@@ -20,19 +20,6 @@ A real-time multiplayer typing race game built with Rust and WebSockets.
    ```
 3. Run the server:
    ```bash
-   cargo run --bin server
+   cargo run -p server
    ```
 4. Open http://localhost:3000 in your browser
-
-### Production
-
-1. Build the release version:
-   ```bash
-   cargo build --release
-   ```
-2. Run the server:
-   ```bash
-   ./target/release/server
-   ```
-
-The server serves static files from the `web/static/` directory and handles WebSocket connections on the same port.
