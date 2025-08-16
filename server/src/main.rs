@@ -25,7 +25,7 @@ use tokio::{
     sync::{broadcast, RwLock},
     time::{interval, Duration},
 };
-use tower_http::{cors::CorsLayer, services::ServeDir};
+use tower_http::{cors::CorsLayer, services::{ServeDir, ServeFile}};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -119,6 +119,9 @@ impl Room {
                         let _ = self.tx.send(ServerMsg::StateChange {
                             state: "countdown".to_string(),
                         });
+                        if let Some(passage) = self.passage.read().await.as_ref() {
+                            let _ = self.tx.send(ServerMsg::Countdown { passage: passage.clone() });
+                        }
 
                         info!("Room {} starting countdown with {} players", self.id, players.len());
                     }
@@ -276,6 +279,9 @@ impl Room {
                                 let _ = self.tx.send(ServerMsg::StateChange {
                                     state: "countdown".to_string(),
                                 });
+                                if let Some(passage) = self.passage.read().await.as_ref() {
+                                    let _ = self.tx.send(ServerMsg::Countdown { passage: passage.clone() });
+                                }
 
                                 info!("Room {} starting countdown after waiting timeout", self.id);
                             } else {
@@ -380,9 +386,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
-        // Serve static files from the workspace's web/static directory
-        // Using a relative path from the current working directory (workspace root when using `cargo run`)
-        .nest_service("/", ServeDir::new("web/static"))
+        // Serve WASM dist with SPA fallback; assumes `web/dist` built via Trunk
+        .nest_service("/", ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
         .layer(CorsLayer::permissive())
         .with_state(rooms);
 

@@ -12,6 +12,8 @@ pub enum ClientMsg {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ServerMsg {
     Lobby { players: Vec<String> },
+    // Sent when countdown starts so clients can render the passage instantly
+    Countdown { passage: String },
     Start { passage: String, t0: u64 },
     Progress { id: String, pos: usize },
     Finish { id: String, wpm: f64, accuracy: f64 },
