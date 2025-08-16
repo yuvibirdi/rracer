@@ -16,7 +16,7 @@ A real-time multiplayer typing race game built with Rust and WebSockets.
 1. Clone the repository
 2. Build the server:
    ```bash
-   cargo build
+   ./setup.sh --run
    ```
 3. Run the server:
    ```bash
