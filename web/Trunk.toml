@@ -1,10 +1,8 @@
-[[hooks]]
-stage = "pre_build"
-command = "echo 'Building rracer web client...'"
+## Hooks disabled
 
 [build]
-target = "web/index.html"
-dist = "web/dist"
+target = "index.html"
+dist = "dist"
 
 [serve]
 address = "127.0.0.1"
