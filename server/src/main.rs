@@ -28,6 +28,7 @@ use tokio::{
 use tower_http::{cors::CorsLayer, services::{ServeDir, ServeFile}};
 use tracing::{info, warn};
 use uuid::Uuid;
+use rand::Rng;
 
 type Rooms = Arc<DashMap<String, Room>>;
 
@@ -41,6 +42,8 @@ struct Player {
     errors: usize,
     finished: bool,
     keystroke_count: usize,
+    is_bot: bool,
+    bot_speed_wpm: Option<f64>,
 }
 
 struct Room {
@@ -100,21 +103,36 @@ impl Room {
             }
             
             if *state == RracerState::Waiting {
-                // Start waiting timer for the first player
-                if self.waiting_start.read().await.is_none() {
-                    *self.waiting_start.write().await = Some(current_timestamp());
-                    info!("Room {} started waiting timer", self.id);
-                    
-                    // Send initial timer message
-                    let _ = self.tx.send(ServerMsg::WaitingTimer { seconds_left: 10 });
-                }
-                
-                // If we have 2+ players, start countdown immediately
-                if players.len() >= 2 {
+                // Start countdown only when we have at least 2 humans
+                let human_count = players.values().filter(|p| !p.is_bot).count();
+                if human_count >= 2 {
                     if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::Join) {
                         *state = new_state;
                         *self.countdown_start.write().await = Some(current_timestamp());
                         *self.passage.write().await = Some(get_random_passage().to_string());
+
+                        // Seed bots to reach at least 5 players total
+                        let total_now = players.len();
+                        let needed = 5usize.saturating_sub(total_now);
+                        for i in 0..needed {
+                            let mut rng = rand::thread_rng();
+                            let wpm: f64 = rng.gen_range(40.0..90.0);
+                            let bot_id = format!("bot-{}-{}", self.id, i);
+                            let bot_name = format!("Bot {}", i + 1);
+                            let bot = Player {
+                                id: bot_id.clone(),
+                                name: bot_name,
+                                position: 0,
+                                start_time: None,
+                                last_keystroke: 0,
+                                errors: 0,
+                                finished: false,
+                                keystroke_count: 0,
+                                is_bot: true,
+                                bot_speed_wpm: Some(wpm),
+                            };
+                            players.insert(bot_id, bot);
+                        }
 
                         let _ = self.tx.send(ServerMsg::StateChange {
                             state: "countdown".to_string(),
@@ -123,7 +141,7 @@ impl Room {
                             let _ = self.tx.send(ServerMsg::Countdown { passage: passage.clone() });
                         }
 
-                        info!("Room {} starting countdown with {} players", self.id, players.len());
+                        info!("Room {} starting countdown with {} players ({} humans)", self.id, players.len(), human_count);
                     }
                 }
             }
@@ -137,7 +155,7 @@ impl Room {
         let mut players = self.players.write().await;
         players.remove(player_id);
 
-        if players.is_empty() {
+    if players.is_empty() {
             let mut state = self.state.write().await;
             *state = RracerState::Waiting;
             *self.passage.write().await = None;
@@ -149,7 +167,7 @@ impl Room {
 
     async fn broadcast_lobby(&self) {
         let players = self.players.read().await;
-        let player_names: Vec<String> = players.values().map(|p| p.name.clone()).collect();
+    let player_names: Vec<String> = players.values().map(|p| p.name.clone()).collect();
 
         info!(
             "Broadcasting lobby update for room {}: {:?}",
@@ -170,6 +188,8 @@ impl Room {
             if current_state != RracerState::Racing {
                 return;
             }
+
+            if player.is_bot { return; }
 
             // Basic rate limiting: prevent extreme spam (allow up to 50 keystrokes per second)
             if ts - player.last_keystroke < 20 {
@@ -209,20 +229,20 @@ impl Room {
                     }
 
                     // Check if player finished
-                    if player.position >= passage_text.len() {
+            if player.position >= passage_text.len() {
                         player.finished = true;
                         let elapsed = (ts - player.start_time.unwrap_or(ts)) as f64 / 1000.0;
                         let wpm = net_wpm(player.position, elapsed, player.errors);
                         let acc = accuracy(player.position - player.errors, player.position);
 
                         let _ = self.tx.send(ServerMsg::Finish {
-                            id: player.name.clone(),
+                id: player.name.clone(),
                             wpm,
                             accuracy: acc,
                         });
                     } else {
                         let _ = self.tx.send(ServerMsg::Progress {
-                            id: player_id.to_string(),
+                id: player.name.clone(),
                             pos: player.position,
                         });
                     }
@@ -250,48 +270,7 @@ impl Room {
 
         match current_state {
             RracerState::Waiting => {
-                // Check if waiting timeout has elapsed (10 seconds)
-                if let Some(waiting_start) = *self.waiting_start.read().await {
-                    let elapsed = current_timestamp() - waiting_start;
-                    let seconds_left = if elapsed >= 10000 { 0 } else { (10000 - elapsed) / 1000 };
-                    
-                    // Only send timer update once per second (when seconds change)
-                    let current_second = elapsed / 1000;
-                    let last_second = self.last_timer_second.load(std::sync::atomic::Ordering::Relaxed);
-                    if current_second != last_second && current_second <= 10 {
-                        self.last_timer_second.store(current_second, std::sync::atomic::Ordering::Relaxed);
-                        let _ = self.tx.send(ServerMsg::WaitingTimer { seconds_left });
-                    }
-                    
-                    if elapsed >= 10000 { // 10 second wait
-                        let players = self.players.read().await;
-                        info!("Waiting timeout reached for room {}, players: {}", self.id, players.len());
-                        if !players.is_empty() {
-                            drop(players); // Release lock before state transition
-                            
-                            let mut state = self.state.write().await;
-                            info!("Current state before transition: {:?}", *state);
-                            if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::Join) {
-                                *state = new_state;
-                                *self.countdown_start.write().await = Some(current_timestamp());
-                                *self.passage.write().await = Some(get_random_passage().to_string());
-
-                                let _ = self.tx.send(ServerMsg::StateChange {
-                                    state: "countdown".to_string(),
-                                });
-                                if let Some(passage) = self.passage.read().await.as_ref() {
-                                    let _ = self.tx.send(ServerMsg::Countdown { passage: passage.clone() });
-                                }
-
-                                info!("Room {} starting countdown after waiting timeout", self.id);
-                            } else {
-                                info!("Failed to transition from waiting state in room {}", self.id);
-                            }
-                        } else {
-                            info!("No players in room {} when waiting timeout reached", self.id);
-                        }
-                    }
-                }
+                // No auto-start timer. Waiting state handled in add_player/remove_player.
             }
             RracerState::Countdown => {
                 if let Some(start_time) = *self.countdown_start.read().await {
@@ -311,6 +290,9 @@ impl Room {
                                 });
                             }
 
+                            // Start bot simulation tasks
+                            self.start_bots().await;
+
                             info!("Room {} started racing", self.id);
                         }
                     }
@@ -326,7 +308,7 @@ impl Room {
             player.position = position;
 
             let _ = self.tx.send(ServerMsg::Progress {
-                id: player_id.to_string(),
+            id: player.name.clone(),
                 pos: position,
             });
         }
@@ -355,6 +337,83 @@ impl Room {
                     });
                 }
             }
+        }
+    }
+
+    async fn start_bots(&self) {
+        let room_id = self.id.clone();
+        let passage_opt = self.passage.read().await.clone();
+    let tx = self.tx.clone();
+        let players_arc = self.players.clone();
+    let state_arc = self.state.clone();
+        if let Some(passage) = passage_opt {
+            let len = passage.len();
+            // snapshot of (id, name, speed) for bots to avoid holding locks in tasks
+            let snapshot: Vec<(String, String, f64)> = {
+                let guard = players_arc.read().await;
+                guard
+                    .iter()
+                    .filter_map(|(id, p)| if p.is_bot { Some((id.clone(), p.name.clone(), p.bot_speed_wpm.unwrap_or(60.0))) } else { None })
+                    .collect()
+            };
+            for (bot_id, name, speed) in snapshot.into_iter() {
+                let tx_clone = tx.clone();
+                let players_arc_clone = players_arc.clone();
+                let state_arc_clone = state_arc.clone();
+                // Calculate chars per second
+                let cps = speed * 5.0 / 60.0;
+                tokio::spawn(async move {
+                    let mut pos: f64 = 0.0;
+                    let mut last = current_timestamp();
+                    let tick = Duration::from_millis(100);
+                    loop {
+                        tokio::time::sleep(tick).await;
+                        let now = current_timestamp();
+                        let dt = (now - last) as f64 / 1000.0;
+                        last = now;
+                        pos += cps * dt;
+                        let mut ipos = pos.floor() as usize;
+                        if ipos > len { ipos = len; }
+                        let _ = tx_clone.send(ServerMsg::Progress { id: name.clone(), pos: ipos });
+                        if ipos >= len {
+                            let wpm = speed; // approx
+                            let acc = 100.0;
+                            let _ = tx_clone.send(ServerMsg::Finish { id: name.clone(), wpm, accuracy: acc });
+                            // Mark bot finished in room state and check if all finished
+                            {
+                                let mut guard = players_arc_clone.write().await;
+                                if let Some(p) = guard.get_mut(&bot_id) {
+                                    p.finished = true;
+                                    p.position = len;
+                                }
+                                let all_finished = guard.values().all(|p| p.finished);
+                                if all_finished && !guard.is_empty() {
+                                    // Drop guard before broadcasting state change? we only hold players lock
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    // After loop, check again and broadcast finished state if everyone is done
+                    let done = {
+                        let guard = players_arc_clone.read().await;
+                        guard.values().all(|p| p.finished) && !guard.is_empty()
+                    };
+                    if done {
+                        // Transition to Finished state if possible
+                        if let Ok(mut state) = state_arc_clone.try_write() {
+                            if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::AllDone) {
+                                *state = new_state;
+                                let _ = tx_clone.send(ServerMsg::StateChange { state: "finished".to_string() });
+                            }
+                        } else {
+                            let _ = tx_clone.send(ServerMsg::StateChange { state: "finished".to_string() });
+                        }
+                    }
+                });
+            }
+        } else {
+            warn!("start_bots called with no passage for room {}", room_id);
         }
     }
 }
@@ -450,6 +509,8 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
                                         errors: 0,
                                         finished: false,
                                         keystroke_count: 0,
+                                        is_bot: false,
+                                        bot_speed_wpm: None,
                                     };
 
                                     room.add_player(player).await;
@@ -492,10 +553,14 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
                                                 *state = new_state;
                                                 *room.passage.write().await = None;
                                                 *room.countdown_start.write().await = None;
+                                                *room.waiting_start.write().await = None;
+                                                room.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
 
                                                 // Reset all players
                                                 let mut players = room.players.write().await;
                                                 info!("Resetting {} players", players.len());
+                                                // Remove bots, reset humans
+                                                players.retain(|_, p| !p.is_bot);
                                                 for player in players.values_mut() {
                                                     player.position = 0;
                                                     player.start_time = None;

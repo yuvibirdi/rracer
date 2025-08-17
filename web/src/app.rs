@@ -408,7 +408,7 @@ pub fn App() -> impl IntoView {
                             <h2 class="text-2xl font-bold text-gray-800 mb-4">"🏁 Waiting for Race"</h2>
                             <div class="text-gray-600 mb-6">
                                 <p class="text-lg">"Waiting for more players to join..."</p>
-                                <p class="text-sm mt-2">"Race starts immediately with 2+ players, or after timer expires"</p>
+                                <p class="text-sm mt-2">"Race starts when 2+ players join the room"</p>
                                 <Show when=move || (waiting_seconds.get() > 0)>
                                     <div class="mt-4 p-3 bg-gray-50 rounded-lg inline-block">
                                         <p class="text-gray-800 font-semibold">{move || format!("Starting in: {} seconds", waiting_seconds.get())}</p>
