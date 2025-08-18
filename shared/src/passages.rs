@@ -4,7 +4,7 @@ pub const PASSAGES: &[&str] = &[
     "To be or not to be, that is the question: Whether 'tis nobler in the mind to suffer the slings and arrows of outrageous fortune.",
     "In the beginning was the Word, and the Word was with God, and the Word was God.",
     "It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of foolishness.",
-    "Call me Ishmael. Some years ago—never mind how long precisely—having little or no money in my purse.",
+    "Call me Ishmael. Some years ago-never mind how long precisely-having little or no money in my purse.",
     "All happy families are alike; each unhappy family is unhappy in its own way.",
     "The only way to do great work is to love what you do. If you haven't found it yet, keep looking.",
     "Programming is not about typing, it's about thinking. The keyboard is just the interface between your thoughts and the computer.",

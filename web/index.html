@@ -56,12 +56,13 @@
             overflow: hidden;
         }
 
-        .race-lane {
+    .race-lane {
             border-bottom: 1px dashed #9ca3af;
             position: relative;
             height: 60px;
             display: flex;
             align-items: center;
+            padding-left: 60px; /* reserve space for name labels */
         }
 
         .race-lane:last-child {
@@ -76,9 +77,11 @@
             align-items: center;
             justify-content: center;
             font-size: 18px;
-            transition: transform 0.3s ease;
+            transition: left 0.3s ease;
             position: absolute;
-            left: 10px;
+            left: 0;
+            top: 50%;
+            transform: translateY(-50%);
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
 

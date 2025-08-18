@@ -72,6 +72,52 @@ impl Room {
         }
     }
 
+    async fn try_start_countdown(&self) {
+        // Guard: only from Waiting and when >=2 humans
+        let mut state = self.state.write().await;
+        if *state != RracerState::Waiting { return; }
+        let mut players = self.players.write().await;
+        let human_count = players.values().filter(|p| !p.is_bot).count();
+        if human_count < 2 { return; }
+
+        if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::Join) {
+            *state = new_state;
+            *self.countdown_start.write().await = Some(current_timestamp());
+            *self.passage.write().await = Some(get_random_passage().to_string());
+
+            // Seed bots to reach at least 5 players total
+            let total_now = players.len();
+            let needed = 5usize.saturating_sub(total_now);
+            for i in 0..needed {
+                let mut rng = rand::thread_rng();
+                let wpm: f64 = rng.gen_range(40.0..90.0);
+                let bot_id = format!("bot-{}-{}-{}", self.id, i, Uuid::new_v4());
+                let bot_name = format!("Bot {}", i + 1);
+                let bot = Player {
+                    id: bot_id.clone(),
+                    name: bot_name,
+                    position: 0,
+                    start_time: None,
+                    last_keystroke: 0,
+                    errors: 0,
+                    finished: false,
+                    keystroke_count: 0,
+                    is_bot: true,
+                    bot_speed_wpm: Some(wpm),
+                };
+                players.insert(bot_id, bot);
+            }
+
+            drop(players); // release before broadcasts
+            self.broadcast_lobby().await;
+            let _ = self.tx.send(ServerMsg::StateChange { state: "countdown".to_string() });
+            if let Some(passage) = self.passage.read().await.as_ref() {
+                let _ = self.tx.send(ServerMsg::Countdown { passage: passage.clone() });
+            }
+            info!("Room {} starting countdown with >=2 humans", self.id);
+        }
+    }
+
     async fn add_player(&self, player: Player) {
         info!("Adding player {} to room {}", player.name, self.id);
         let mut players = self.players.write().await;
@@ -103,52 +149,15 @@ impl Room {
             }
             
             if *state == RracerState::Waiting {
-                // Start countdown only when we have at least 2 humans
-                let human_count = players.values().filter(|p| !p.is_bot).count();
-                if human_count >= 2 {
-                    if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::Join) {
-                        *state = new_state;
-                        *self.countdown_start.write().await = Some(current_timestamp());
-                        *self.passage.write().await = Some(get_random_passage().to_string());
-
-                        // Seed bots to reach at least 5 players total
-                        let total_now = players.len();
-                        let needed = 5usize.saturating_sub(total_now);
-                        for i in 0..needed {
-                            let mut rng = rand::thread_rng();
-                            let wpm: f64 = rng.gen_range(40.0..90.0);
-                            let bot_id = format!("bot-{}-{}", self.id, i);
-                            let bot_name = format!("Bot {}", i + 1);
-                            let bot = Player {
-                                id: bot_id.clone(),
-                                name: bot_name,
-                                position: 0,
-                                start_time: None,
-                                last_keystroke: 0,
-                                errors: 0,
-                                finished: false,
-                                keystroke_count: 0,
-                                is_bot: true,
-                                bot_speed_wpm: Some(wpm),
-                            };
-                            players.insert(bot_id, bot);
-                        }
-
-                        let _ = self.tx.send(ServerMsg::StateChange {
-                            state: "countdown".to_string(),
-                        });
-                        if let Some(passage) = self.passage.read().await.as_ref() {
-                            let _ = self.tx.send(ServerMsg::Countdown { passage: passage.clone() });
-                        }
-
-                        info!("Room {} starting countdown with {} players ({} humans)", self.id, players.len(), human_count);
-                    }
-                }
+                // Defer to shared starter (releases locks internally)
+                drop(players);
+                drop(state);
+                self.try_start_countdown().await;
             }
         }
 
-        drop(players); // Release the lock before calling broadcast_lobby
-        self.broadcast_lobby().await;
+    // Release locks before broadcasting lobby
+    self.broadcast_lobby().await;
     }
 
     async fn remove_player(&self, player_id: &str) {
@@ -468,37 +477,27 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
     let mut _player_name: Option<String> = None;
     let mut room_rx: Option<broadcast::Receiver<ServerMsg>> = None;
 
-    info!(
-        "New WebSocket connection established for player {}",
-        player_id
-    );
+    info!("New WebSocket connection established for player {}", player_id);
 
-    // Handle incoming messages and room subscriptions
     loop {
         tokio::select! {
-            // Handle incoming WebSocket messages
+            // Incoming client messages
             ws_msg = receiver.next() => {
                 match ws_msg {
                     Some(Ok(Message::Text(text))) => {
-                        info!("Received WebSocket message from {}: {}", player_id, text);
                         if let Ok(client_msg) = serde_json::from_str::<ClientMsg>(&text) {
                             match client_msg {
                                 ClientMsg::Join { room, name } => {
-                                    info!("Received Join message: room={}, name={}, player_id={}", room, name, player_id);
-
-                                    // Leave current room if any
+                                    // Leave previous room
                                     if let Some(room_id) = &current_room {
                                         if let Some(room) = rooms.get(room_id) {
                                             room.remove_player(&player_id).await;
                                         }
                                     }
 
-                                    // Join new room
+                                    // Join the new room
                                     let room = rooms.entry(room.clone()).or_insert_with(|| Room::new(room.clone()));
-
-                                    // Subscribe to room messages
                                     room_rx = Some(room.tx.subscribe());
-                                    info!("Player {} subscribed to room {} broadcasts", player_id, room.id);
 
                                     let player = Player {
                                         id: player_id.clone(),
@@ -516,8 +515,6 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
                                     room.add_player(player).await;
                                     current_room = Some(room.id.clone());
                                     _player_name = Some(name);
-
-                                    info!("Player {} successfully joined room {}", player_id, room.id);
                                 }
                                 ClientMsg::Key { ch, ts } => {
                                     if let Some(room_id) = &current_room {
@@ -541,50 +538,37 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
                                     }
                                 }
                                 ClientMsg::Reset => {
-                                    info!("Received Reset message from player {}", player_id);
                                     if let Some(room_id) = &current_room {
-                                        info!("Player {} is in room {}", player_id, room_id);
                                         if let Some(room) = rooms.get(room_id) {
-                                            info!("Found room {}, attempting reset", room_id);
-                                            let mut state = room.state.write().await;
-                                            info!("Current room state: {:?}", *state);
-                                            if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::Reset) {
-                                                info!("State transition successful: {:?} -> {:?}", *state, new_state);
+                                            // Transition to waiting and clear race state
+                                            if let Some(new_state) = {
+                                                let state = room.state.read().await.clone();
+                                                RracerState::transition(&state, &RracerEvent::Reset)
+                                            } {
+                                                let mut state = room.state.write().await;
                                                 *state = new_state;
-                                                *room.passage.write().await = None;
-                                                *room.countdown_start.write().await = None;
-                                                *room.waiting_start.write().await = None;
-                                                room.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
-
-                                                // Reset all players
-                                                let mut players = room.players.write().await;
-                                                info!("Resetting {} players", players.len());
-                                                // Remove bots, reset humans
-                                                players.retain(|_, p| !p.is_bot);
-                                                for player in players.values_mut() {
-                                                    player.position = 0;
-                                                    player.start_time = None;
-                                                    player.errors = 0;
-                                                    player.finished = false;
-                                                    player.keystroke_count = 0;
-                                                }
-
-                                                let _ = room.tx.send(ServerMsg::StateChange {
-                                                    state: "waiting".to_string(),
-                                                });
-                                                info!("Sent StateChange to waiting");
-
-                                                drop(players); // Release lock before broadcast
-                                                room.broadcast_lobby().await;
-                                                info!("Reset complete for room {}", room_id);
-                                            } else {
-                                                info!("State transition failed from {:?} with Reset event", *state);
                                             }
-                                        } else {
-                                            info!("Room {} not found", room_id);
+                                            *room.passage.write().await = None;
+                                            *room.countdown_start.write().await = None;
+                                            *room.waiting_start.write().await = None;
+                                            room.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
+
+                                            // Remove bots and reset humans
+                                            let mut players = room.players.write().await;
+                                            players.retain(|_, p| !p.is_bot);
+                                            for player in players.values_mut() {
+                                                player.position = 0;
+                                                player.start_time = None;
+                                                player.errors = 0;
+                                                player.finished = false;
+                                                player.keystroke_count = 0;
+                                            }
+                                            drop(players);
+
+                                            let _ = room.tx.send(ServerMsg::StateChange { state: "waiting".to_string() });
+                                            room.broadcast_lobby().await;
+                                            room.try_start_countdown().await;
                                         }
-                                    } else {
-                                        info!("Player {} not in any room", player_id);
                                     }
                                 }
                             }
@@ -595,45 +579,33 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
                 }
             }
 
-            // Handle room broadcast messages
+            // Room broadcast messages
             room_msg = async {
                 if let Some(ref mut rx) = room_rx {
                     rx.recv().await
                 } else {
-                    // If no room subscription, wait indefinitely
                     std::future::pending().await
                 }
             } => {
                 match room_msg {
                     Ok(msg) => {
-                        info!("Forwarding message to player {}: {:?}", player_id, msg);
                         if let Ok(text) = serde_json::to_string(&msg) {
                             if sender.send(Message::Text(text)).await.is_err() {
-                                info!("Failed to send message to player {}", player_id);
                                 break;
                             }
                         }
                     }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        info!("Broadcast channel closed for player {}", player_id);
-                        break;
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        info!("Lagged message for player {}", player_id);
-                        // Skip lagged messages
-                        continue;
-                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 }
             }
         }
     }
 
-    // Cleanup on disconnect
+    // Cleanup
     if let Some(room_id) = &current_room {
         if let Some(room) = rooms.get(room_id) {
             room.remove_player(&player_id).await;
         }
     }
-
-    info!("Player {} disconnected", player_id);
 }

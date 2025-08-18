@@ -5,6 +5,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlElement, WebSocket};
 use std::cell::RefCell;
+// no std::rc needed
 
 // Thread-local storage for the active WebSocket. This avoids capturing non-Send/Sync
 // types inside Leptos children closures, which require Fn + Send + Sync.
@@ -28,6 +29,7 @@ pub fn App() -> impl IntoView {
     let (_error_message, set_error_message) = signal(None::<String>);
     let (wpm, set_wpm) = signal(0.0);
     let (accuracy, set_accuracy) = signal(100.0);
+    let (time_elapsed, set_time_elapsed) = signal(0.0f64);
     let (waiting_seconds, set_waiting_seconds) = signal(0u64);
     let (joined, set_joined) = signal(false);
     let (connecting, set_connecting) = signal(false);
@@ -35,6 +37,28 @@ pub fn App() -> impl IntoView {
     let (leaderboard, set_leaderboard) = signal(Vec::<(String, f64, f64)>::new());
     
     // WebSocket is managed via thread-local storage (WS_REF)
+
+    // Lightweight timer loop: update elapsed time every 100ms using server t0
+    {
+        let game_state_sig = game_state.clone();
+        let start_time_sig = start_time.clone();
+        let set_time_elapsed_sig = set_time_elapsed.clone();
+        if let Some(win) = web_sys::window() {
+            let cb = Closure::wrap(Box::new(move || {
+                if game_state_sig.get_untracked() == "racing" {
+                    if let Some(t0_ms) = start_time_sig.get_untracked() {
+                        let now_ms = js_sys::Date::now();
+                        let elapsed = (now_ms - t0_ms) / 1000.0;
+                        if elapsed >= 0.0 {
+                            set_time_elapsed_sig.set(elapsed);
+                        }
+                    }
+                }
+            }) as Box<dyn FnMut()>);
+            let _ = win.set_interval_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), 100);
+            cb.forget();
+        }
+    }
 
     let connect_websocket = {
         move || {
@@ -98,6 +122,7 @@ pub fn App() -> impl IntoView {
                         let set_player_positions = set_player_positions.clone();
                         let set_wpm = set_wpm.clone();
                         let set_accuracy = set_accuracy.clone();
+                        let set_time_elapsed_cb = set_time_elapsed.clone();
                         let set_error_message = set_error_message.clone();
                         let set_player_positions2 = set_player_positions.clone();
                         let player_name_signal = player_name.clone();
@@ -126,10 +151,12 @@ pub fn App() -> impl IntoView {
                                             let me = player_name_signal.get();
                                             set_player_positions2.update(|m| { m.insert(me, 0); });
                                         }
-                                        ServerMsg::Start { passage: p, t0: _ } => {
+                                        ServerMsg::Start { passage: p, t0 } => {
                                             set_passage.set(p);
                                             set_game_state.set("racing".to_string());
-                                            set_start_time.set(Some(js_sys::Date::now()));
+                                            // Use server start time for sync across clients
+                                            set_start_time.set(Some(t0 as f64));
+                                            set_time_elapsed_cb.set(0.0);
                                             set_current_position.set(0);
                                             set_errors.set(0);
                                             set_wpm.set(0.0);
@@ -280,7 +307,7 @@ pub fn App() -> impl IntoView {
                                     <div class="text-sm text-gray-500">"Accuracy"</div>
                                 </div>
                                 <div class="text-center">
-                                    <div class="text-3xl font-bold text-purple-600">"0s"</div>
+                                    <div class="text-3xl font-bold text-purple-600">{move || format!("{:.1}s", time_elapsed.get())}</div>
                                     <div class="text-sm text-gray-500">"Time"</div>
                                 </div>
                             </div>
@@ -310,10 +337,10 @@ pub fn App() -> impl IntoView {
                                     let label = player.clone();
                                     view! {
                                         <div class="race-lane">
-                                            <div class=car_class style=move || format!("transform: translateX(calc({}% - 10px));", percent())>
+                                            <div class=car_class style=move || format!("left: {}%;", percent())>
                                                 "🚗"
                                             </div>
-                                            <div class="ml-14 text-gray-700 font-medium">{label}</div>
+                                            <div class="ml-14 pl-10 text-gray-700 font-medium">{label}</div>
                                         </div>
                                     }
                                 }
@@ -341,7 +368,7 @@ pub fn App() -> impl IntoView {
                                                 // Update realtime WPM & accuracy
                                                 if let Some(start) = start_time.get() {
                                                     let now = js_sys::Date::now();
-                                                    let elapsed = (now - start) / 1000.0; // seconds
+                                                    let elapsed = (now - start) / 1000.0; // seconds (server-synced)
                                                     if elapsed > 0.0 {
                                                         let chars_typed = current_position.get();
                                                         let gross_wpm = (chars_typed as f64 / 5.0) / (elapsed / 60.0);
