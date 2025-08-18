@@ -9,12 +9,14 @@ use axum::{
 };
 use dashmap::DashMap;
 use futures::{sink::SinkExt, stream::StreamExt};
+use rand::Rng;
 use rust_fsm::StateMachineImpl;
 use shared::{
     fsm::{RracerEvent, RracerState},
     protocol::{ClientMsg, ServerMsg},
     wpm::{accuracy, gross_wpm, net_wpm},
 };
+use sqlx::PgPool;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -27,10 +29,9 @@ use tokio::{
 use tower_http::{cors::CorsLayer, services::{ServeDir, ServeFile}};
 use tracing::{info, warn};
 use uuid::Uuid;
+
 mod db;
-use db::{get_random_passage as db_get_random_passage};
-use sqlx::PgPool;
-use rand::Rng;
+use db::get_random_passage as db_get_random_passage;
 
 type Rooms = Arc<DashMap<String, Room>>;
 
@@ -83,7 +84,6 @@ impl Room {
     }
 
     async fn try_start_countdown(&self) {
-        // Guard: only from Waiting and when >=2 humans
         let mut state = self.state.write().await;
         if *state != RracerState::Waiting { return; }
         let mut players = self.players.write().await;
@@ -93,10 +93,10 @@ impl Room {
         if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::Join) {
             *state = new_state;
             *self.countdown_start.write().await = Some(current_timestamp());
-                        let p = db_get_random_passage(self.db.as_deref()).await;
-                        *self.passage.write().await = Some(p);
+            let p = db_get_random_passage(self.db.as_deref()).await;
+            *self.passage.write().await = Some(p);
 
-            // Seed bots to reach at least 5 players total
+            // Seed bots up to 5 total
             let total_now = players.len();
             let needed = 5usize.saturating_sub(total_now);
             for i in 0..needed {
@@ -119,12 +119,10 @@ impl Room {
                 players.insert(bot_id, bot);
             }
 
-            drop(players); // release before broadcasts
+            drop(players);
             self.broadcast_lobby().await;
             let _ = self.tx.send(ServerMsg::StateChange { state: "countdown".to_string() });
-            if let Some(passage) = self.passage.read().await.as_ref() {
-                let _ = self.tx.send(ServerMsg::Countdown { passage: passage.clone() });
-            }
+            if let Some(p) = self.passage.read().await.as_ref() { let _ = self.tx.send(ServerMsg::Countdown { passage: p.clone() }); }
             info!("Room {} starting countdown with >=2 humans", self.id);
         }
     }
@@ -133,14 +131,10 @@ impl Room {
         info!("Adding player {} to room {}", player.name, self.id);
         let mut players = self.players.write().await;
         players.insert(player.id.clone(), player);
-
         info!("Room {} now has {} players", self.id, players.len());
 
-        // Check if we should start waiting or countdown
         if players.len() >= 1 {
             let mut state = self.state.write().await;
-            
-            // If the game is finished, reset it to waiting state when new players join
             if *state == RracerState::Finished {
                 info!("Resetting finished game for new player in room {}", self.id);
                 *state = RracerState::Waiting;
@@ -148,175 +142,74 @@ impl Room {
                 *self.countdown_start.write().await = None;
                 *self.waiting_start.write().await = None;
                 self.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
-                
-                // Reset all existing players
-                for player in players.values_mut() {
-                    player.position = 0;
-                    player.start_time = None;
-                    player.errors = 0;
-                    player.finished = false;
-                    player.keystroke_count = 0;
+                for p in players.values_mut() {
+                    p.position = 0; p.start_time=None; p.errors=0; p.finished=false; p.keystroke_count=0;
                 }
             }
-            
-            if *state == RracerState::Waiting {
-                // Defer to shared starter (releases locks internally)
-                drop(players);
-                drop(state);
-                self.try_start_countdown().await;
-            }
         }
-
-    // Release locks before broadcasting lobby
-    self.broadcast_lobby().await;
+        drop(players);
+        self.broadcast_lobby().await;
+        self.try_start_countdown().await;
     }
 
     async fn remove_player(&self, player_id: &str) {
         let mut players = self.players.write().await;
         players.remove(player_id);
-
-    if players.is_empty() {
+        if players.is_empty() {
             let mut state = self.state.write().await;
             *state = RracerState::Waiting;
             *self.passage.write().await = None;
             *self.countdown_start.write().await = None;
         }
-
         self.broadcast_lobby().await;
     }
 
     async fn broadcast_lobby(&self) {
         let players = self.players.read().await;
-    let player_names: Vec<String> = players.values().map(|p| p.name.clone()).collect();
-
-        info!(
-            "Broadcasting lobby update for room {}: {:?}",
-            self.id, player_names
-        );
-        let _ = self.tx.send(ServerMsg::Lobby {
-            players: player_names,
-        });
+        let names: Vec<String> = players.values().map(|p| p.name.clone()).collect();
+        info!("Broadcasting lobby update for room {}: {:?}", self.id, names);
+        let _ = self.tx.send(ServerMsg::Lobby { players: names });
     }
 
     async fn handle_keystroke(&self, player_id: &str, ch: char, ts: u64) {
         let mut players = self.players.write().await;
         let passage = self.passage.read().await;
-
         if let (Some(player), Some(passage_text)) = (players.get_mut(player_id), passage.as_ref()) {
             let current_state = *self.state.read().await;
-
-            if current_state != RracerState::Racing {
-                return;
-            }
-
+            if current_state != RracerState::Racing { return; }
             if player.is_bot { return; }
-
-            // Basic rate limiting: prevent extreme spam (allow up to 50 keystrokes per second)
-            if ts - player.last_keystroke < 20 {
-                // 20ms = 50 keystrokes per second max
-                return; // Just ignore spam
-            }
-            player.last_keystroke = ts;
-            player.keystroke_count += 1;
-
-            // Additional anti-cheat: check for impossible typing speeds
-            if let Some(start) = player.start_time {
-                let elapsed_seconds = (ts - start) as f64 / 1000.0;
-                if elapsed_seconds > 0.1 {
-                    // Only check after 100ms
-                    let current_wpm = gross_wpm(player.position, elapsed_seconds);
-                    if current_wpm > 300.0 {
-                        // Impossible speed threshold
-                        warn!(
-                            "Suspicious typing speed from player {}: {} WPM",
-                            player_id, current_wpm
-                        );
-                        let _ = self.tx.send(ServerMsg::Error {
-                            message: "Suspicious typing speed detected".to_string(),
-                        });
-                        return;
-                    }
-                }
-            }
-
-            // Validate keystroke
+            if ts - player.last_keystroke < 20 { return; }
+            player.last_keystroke = ts; player.keystroke_count += 1;
+            if let Some(start) = player.start_time { let elapsed_seconds = (ts - start) as f64 / 1000.0; if elapsed_seconds > 0.1 { let current_wpm = gross_wpm(player.position, elapsed_seconds); if current_wpm > 300.0 { warn!("Suspicious typing speed from player {}: {} WPM", player_id, current_wpm); let _ = self.tx.send(ServerMsg::Error { message: "Suspicious typing speed detected".to_string() }); return; }}}
             if let Some(expected_char) = passage_text.chars().nth(player.position) {
                 if ch == expected_char {
                     player.position += 1;
-
-                    if player.start_time.is_none() {
-                        player.start_time = Some(ts);
-                    }
-
-                    // Check if player finished
-            if player.position >= passage_text.len() {
+                    if player.start_time.is_none() { player.start_time = Some(ts); }
+                    if player.position >= passage_text.len() {
                         player.finished = true;
                         let elapsed = (ts - player.start_time.unwrap_or(ts)) as f64 / 1000.0;
                         let wpm = net_wpm(player.position, elapsed, player.errors);
                         let acc = accuracy(player.position - player.errors, player.position);
-
-                        let _ = self.tx.send(ServerMsg::Finish {
-                id: player.name.clone(),
-                            wpm,
-                            accuracy: acc,
-                        });
+                        let _ = self.tx.send(ServerMsg::Finish { id: player.name.clone(), wpm, accuracy: acc });
                     } else {
-                        let _ = self.tx.send(ServerMsg::Progress {
-                id: player.name.clone(),
-                            pos: player.position,
-                        });
+                        let _ = self.tx.send(ServerMsg::Progress { id: player.name.clone(), pos: player.position });
                     }
-                } else {
-                    player.errors += 1;
-                }
+                } else { player.errors += 1; }
             }
         }
-
-        // Check if all players finished
         let all_finished = players.values().all(|p| p.finished);
         if all_finished && !players.is_empty() {
             let mut state = self.state.write().await;
-            if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::AllDone) {
-                *state = new_state;
-                let _ = self.tx.send(ServerMsg::StateChange {
-                    state: "finished".to_string(),
-                });
-            }
+            if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::AllDone) { *state = new_state; let _ = self.tx.send(ServerMsg::StateChange { state: "finished".to_string() }); }
         }
     }
 
     async fn tick(&self) {
         let current_state = *self.state.read().await;
-
         match current_state {
-            RracerState::Waiting => {
-                // No auto-start timer. Waiting state handled in add_player/remove_player.
-            }
+            RracerState::Waiting => { /* waiting handled in add/remove */ }
             RracerState::Countdown => {
-                if let Some(start_time) = *self.countdown_start.read().await {
-                    let elapsed = current_timestamp() - start_time;
-                    if elapsed >= 3000 {
-                        // 3 second countdown
-                        let mut state = self.state.write().await;
-                        if let Some(new_state) =
-                            RracerState::transition(&*state, &RracerEvent::CountdownElapsed)
-                        {
-                            *state = new_state;
-
-                            if let Some(passage) = self.passage.read().await.as_ref() {
-                                let _ = self.tx.send(ServerMsg::Start {
-                                    passage: passage.clone(),
-                                    t0: current_timestamp(),
-                                });
-                            }
-
-                            // Start bot simulation tasks
-                            self.start_bots().await;
-
-                            info!("Room {} started racing", self.id);
-                        }
-                    }
-                }
+                if let Some(start_time) = *self.countdown_start.read().await { let elapsed = current_timestamp() - start_time; if elapsed >= 3000 { let mut state = self.state.write().await; if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::CountdownElapsed) { *state = new_state; if let Some(passage) = self.passage.read().await.as_ref() { let _ = self.tx.send(ServerMsg::Start { passage: passage.clone(), t0: current_timestamp(), }); } self.start_bots().await; info!("Room {} started racing", self.id); } } }
             }
             _ => {}
         }
@@ -326,11 +219,7 @@ impl Room {
         let mut players = self.players.write().await;
         if let Some(player) = players.get_mut(player_id) {
             player.position = position;
-
-            let _ = self.tx.send(ServerMsg::Progress {
-            id: player.name.clone(),
-                pos: position,
-            });
+            let _ = self.tx.send(ServerMsg::Progress { id: player.name.clone(), pos: position });
         }
     }
 
@@ -338,157 +227,61 @@ impl Room {
         let mut players = self.players.write().await;
         if let Some(player) = players.get_mut(player_id) {
             player.finished = true;
-
-            let _ = self.tx.send(ServerMsg::Finish {
-                id: player.name.clone(),
-                wpm,
-                accuracy,
-            });
-
-            // Check if all players finished
+            let _ = self.tx.send(ServerMsg::Finish { id: player.name.clone(), wpm, accuracy });
             let all_finished = players.values().all(|p| p.finished);
             if all_finished && !players.is_empty() {
-                drop(players); // Release lock before state transition
+                drop(players);
                 let mut state = self.state.write().await;
-                if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::AllDone) {
-                    *state = new_state;
-                    let _ = self.tx.send(ServerMsg::StateChange {
-                        state: "finished".to_string(),
-                    });
-                }
+                if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::AllDone) { *state = new_state; let _ = self.tx.send(ServerMsg::StateChange { state: "finished".to_string() }); }
             }
         }
     }
 
     async fn start_bots(&self) {
-        let room_id = self.id.clone();
         let passage_opt = self.passage.read().await.clone();
-    let tx = self.tx.clone();
+        let tx = self.tx.clone();
         let players_arc = self.players.clone();
-    let state_arc = self.state.clone();
+        let state_arc = self.state.clone();
         if let Some(passage) = passage_opt {
             let len = passage.len();
-            // snapshot of (id, name, speed) for bots to avoid holding locks in tasks
-            let snapshot: Vec<(String, String, f64)> = {
-                let guard = players_arc.read().await;
-                guard
-                    .iter()
-                    .filter_map(|(id, p)| if p.is_bot { Some((id.clone(), p.name.clone(), p.bot_speed_wpm.unwrap_or(60.0))) } else { None })
-                    .collect()
-            };
+            let snapshot: Vec<(String, String, f64)> = { let guard = players_arc.read().await; guard.iter().filter_map(|(id,p)| if p.is_bot { Some((id.clone(), p.name.clone(), p.bot_speed_wpm.unwrap_or(60.0))) } else { None }).collect() };
             for (bot_id, name, speed) in snapshot.into_iter() {
-                let tx_clone = tx.clone();
-                let players_arc_clone = players_arc.clone();
-                let state_arc_clone = state_arc.clone();
-                // Calculate chars per second
+                let tx_clone = tx.clone(); let players_arc_clone = players_arc.clone(); let state_arc_clone = state_arc.clone();
                 let cps = speed * 5.0 / 60.0;
                 tokio::spawn(async move {
-                    let mut pos: f64 = 0.0;
-                    let mut last = current_timestamp();
-                    let tick = Duration::from_millis(100);
-                    loop {
-                        tokio::time::sleep(tick).await;
-                        let now = current_timestamp();
-                        let dt = (now - last) as f64 / 1000.0;
-                        last = now;
-                        pos += cps * dt;
-                        let mut ipos = pos.floor() as usize;
-                        if ipos > len { ipos = len; }
-                        let _ = tx_clone.send(ServerMsg::Progress { id: name.clone(), pos: ipos });
-                        if ipos >= len {
-                            let wpm = speed; // approx
-                            let acc = 100.0;
-                            let _ = tx_clone.send(ServerMsg::Finish { id: name.clone(), wpm, accuracy: acc });
-                            // Mark bot finished in room state and check if all finished
-                            {
-                                let mut guard = players_arc_clone.write().await;
-                                if let Some(p) = guard.get_mut(&bot_id) {
-                                    p.finished = true;
-                                    p.position = len;
-                                }
-                                let all_finished = guard.values().all(|p| p.finished);
-                                if all_finished && !guard.is_empty() {
-                                    // Drop guard before broadcasting state change? we only hold players lock
-                                }
-                            }
-                            break;
-                        }
-                    }
-                    // After loop, check again and broadcast finished state if everyone is done
-                    let done = {
-                        let guard = players_arc_clone.read().await;
-                        guard.values().all(|p| p.finished) && !guard.is_empty()
-                    };
-                    if done {
-                        // Transition to Finished state if possible
-                        if let Ok(mut state) = state_arc_clone.try_write() {
-                            if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::AllDone) {
-                                *state = new_state;
-                                let _ = tx_clone.send(ServerMsg::StateChange { state: "finished".to_string() });
-                            }
-                        } else {
-                            let _ = tx_clone.send(ServerMsg::StateChange { state: "finished".to_string() });
-                        }
-                    }
+                    let mut pos: f64 = 0.0; let mut last = current_timestamp(); let tick = Duration::from_millis(100);
+                    loop { tokio::time::sleep(tick).await; let now = current_timestamp(); let dt = (now - last) as f64 / 1000.0; last = now; pos += cps * dt; let mut ipos = pos.floor() as usize; if ipos > len { ipos = len; } let _ = tx_clone.send(ServerMsg::Progress { id: name.clone(), pos: ipos }); if ipos >= len { let wpm = speed; let acc = 100.0; let _ = tx_clone.send(ServerMsg::Finish { id: name.clone(), wpm, accuracy: acc }); { let mut guard = players_arc_clone.write().await; if let Some(p) = guard.get_mut(&bot_id) { p.finished = true; p.position = len; } let all_finished = guard.values().all(|p| p.finished); if all_finished && !guard.is_empty() { } } break; } }
+                    let done = { let guard = players_arc_clone.read().await; guard.values().all(|p| p.finished) && !guard.is_empty() };
+                    if done { if let Ok(mut state) = state_arc_clone.try_write() { if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::AllDone) { *state = new_state; let _ = tx_clone.send(ServerMsg::StateChange { state: "finished".to_string() }); } } else { let _ = tx_clone.send(ServerMsg::StateChange { state: "finished".to_string() }); } }
                 });
             }
-        } else {
-            warn!("start_bots called with no passage for room {}", room_id);
         }
     }
 }
 
-fn current_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-}
+fn current_timestamp() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
-    // Optional DB
     let db_url = std::env::var("DATABASE_URL").ok();
-    let db_pool: Option<Arc<PgPool>> = if let Some(url) = db_url {
-        match db::connect(&url).await {
-            Ok(pool) => Some(Arc::new(pool)),
-            Err(e) => { tracing::warn!("DB connection failed: {:?}", e); None }
-        }
-    } else { None };
-
+    let db_pool: Option<Arc<PgPool>> = if let Some(url) = db_url { match db::connect(&url).await { Ok(pool) => Some(Arc::new(pool)), Err(e) => { tracing::warn!("DB connection failed: {:?}", e); None } } } else { None };
     let rooms: Rooms = Arc::new(DashMap::new());
     let app_state = AppState { rooms: rooms.clone(), db: db_pool.clone() };
-
-    // Spawn tick loop
     let rooms_tick = rooms.clone();
-    tokio::spawn(async move {
-        let mut interval = interval(Duration::from_millis(50));
-        loop {
-            interval.tick().await;
-            for room in rooms_tick.iter() {
-                room.value().tick().await;
-            }
-        }
-    });
-
+    tokio::spawn(async move { let mut interval = interval(Duration::from_millis(50)); loop { interval.tick().await; for room in rooms_tick.iter() { room.value().tick().await; } } });
     let app = Router::new()
         .route("/ws", get(ws_handler))
-        // Serve WASM dist with SPA fallback; assumes `web/dist` built via Trunk
         .nest_service("/", ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
         .layer(CorsLayer::permissive())
-    .with_state(app_state.clone());
-
+        .with_state(app_state.clone());
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     info!("Server running on http://0.0.0.0:3000");
-
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
-}
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse { ws.on_upgrade(move |socket| handle_socket(socket, state)) }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
@@ -496,111 +289,36 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let mut current_room: Option<String> = None;
     let mut _player_name: Option<String> = None;
     let mut room_rx: Option<broadcast::Receiver<ServerMsg>> = None;
-
     info!("New WebSocket connection established for player {}", player_id);
-
     loop {
         tokio::select! {
-            // Incoming client messages
             ws_msg = receiver.next() => {
                 match ws_msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(client_msg) = serde_json::from_str::<ClientMsg>(&text) {
                             match client_msg {
                                 ClientMsg::Join { room, name } => {
-                                    // Leave previous room
-                                    if let Some(room_id) = &current_room {
-                                        if let Some(room) = state.rooms.get(room_id) {
-                                            room.remove_player(&player_id).await;
-                                        }
-                                    }
-
-                                    // Join the new room
+                                    if let Some(room_id) = &current_room { if let Some(room) = state.rooms.get(room_id) { room.remove_player(&player_id).await; } }
                                     let db_for_room = state.db.clone();
                                     let room = state.rooms.entry(room.clone()).or_insert_with(|| Room::new(room.clone(), db_for_room));
                                     room_rx = Some(room.tx.subscribe());
-
-                                    let player = Player {
-                                        id: player_id.clone(),
-                                        name: name.clone(),
-                                        position: 0,
-                                        start_time: None,
-                                        last_keystroke: 0,
-                                        errors: 0,
-                                        finished: false,
-                                        keystroke_count: 0,
-                                        is_bot: false,
-                                        bot_speed_wpm: None,
-                                    };
-
+                                    let player = Player { id: player_id.clone(), name: name.clone(), position:0, start_time: None, last_keystroke:0, errors:0, finished:false, keystroke_count:0, is_bot:false, bot_speed_wpm: None };
                                     room.add_player(player).await;
                                     current_room = Some(room.id.clone());
                                     _player_name = Some(name);
-
-                                    // Immediately send a lobby snapshot directly to this client
-                                    // to ensure the UI syncs even if the broadcast is missed due to timing.
-                                    if let Ok(player_list_json) = {
-                                        let players_guard = room.players.read().await;
-                                        let player_names: Vec<String> = players_guard.values().map(|p| p.name.clone()).collect();
-                                        serde_json::to_string(&ServerMsg::Lobby { players: player_names })
-                                    } {
-                                        let _ = sender.send(Message::Text(player_list_json)).await;
-                                    }
+                                    // Direct lobby snapshot for the joiner
+                                    if let Ok(text) = { let g = room.players.read().await; let names: Vec<String> = g.values().map(|p| p.name.clone()).collect(); serde_json::to_string(&ServerMsg::Lobby { players: names }) } { let _ = sender.send(Message::Text(text)).await; }
                                 }
-                                ClientMsg::Key { ch, ts } => {
-                                    if let Some(room_id) = &current_room {
-                                        if let Some(room) = state.rooms.get(room_id) {
-                                            room.handle_keystroke(&player_id, ch, ts).await;
-                                        }
-                                    }
-                                }
-                                ClientMsg::Progress { pos, ts: _ } => {
-                                    if let Some(room_id) = &current_room {
-                                        if let Some(room) = state.rooms.get(room_id) {
-                                            room.update_player_progress(&player_id, pos).await;
-                                        }
-                                    }
-                                }
-                                ClientMsg::Finish { wpm, accuracy, time: _, ts: _ } => {
-                                    if let Some(room_id) = &current_room {
-                                        if let Some(room) = state.rooms.get(room_id) {
-                                            room.handle_player_finish(&player_id, wpm, accuracy).await;
-                                        }
-                                    }
-                                }
+                                ClientMsg::Key { ch, ts } => { if let Some(room_id) = &current_room { if let Some(room) = state.rooms.get(room_id) { room.handle_keystroke(&player_id, ch, ts).await; } } }
+                                ClientMsg::Progress { pos, ts: _ } => { if let Some(room_id) = &current_room { if let Some(room) = state.rooms.get(room_id) { room.update_player_progress(&player_id, pos).await; } } }
+                                ClientMsg::Finish { wpm, accuracy, time: _, ts: _ } => { if let Some(room_id) = &current_room { if let Some(room) = state.rooms.get(room_id) { room.handle_player_finish(&player_id, wpm, accuracy).await; } } }
                                 ClientMsg::Reset => {
-                                    if let Some(room_id) = &current_room {
-                                        if let Some(room) = state.rooms.get(room_id) {
-                                            // Transition to waiting and clear race state
-                                            if let Some(new_state) = {
-                                                let state = room.state.read().await.clone();
-                                                RracerState::transition(&state, &RracerEvent::Reset)
-                                            } {
-                                                let mut state = room.state.write().await;
-                                                *state = new_state;
-                                            }
-                                            *room.passage.write().await = None;
-                                            *room.countdown_start.write().await = None;
-                                            *room.waiting_start.write().await = None;
-                                            room.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
-
-                                            // Remove bots and reset humans
-                                            let mut players = room.players.write().await;
-                                            players.retain(|_, p| !p.is_bot);
-                                            for player in players.values_mut() {
-                                                player.position = 0;
-                                                player.start_time = None;
-                                                player.errors = 0;
-                                                player.finished = false;
-                                                player.keystroke_count = 0;
-                                            }
-                                            drop(players);
-
-                                            let _ = room.tx.send(ServerMsg::StateChange { state: "waiting".to_string() });
-                                            room.broadcast_lobby().await;
-                                            room.try_start_countdown().await;
-                                        }
-                                    }
+                                    if let Some(room_id) = &current_room { if let Some(room) = state.rooms.get(room_id) {
+                                        if let Some(new_state) = { let state = room.state.read().await.clone(); RracerState::transition(&state, &RracerEvent::Reset) } { let mut state_w = room.state.write().await; *state_w = new_state; }
+                                        *room.passage.write().await = None; *room.countdown_start.write().await = None; *room.waiting_start.write().await = None; room.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        let mut players = room.players.write().await; players.retain(|_,p| !p.is_bot); for p in players.values_mut() { p.position=0; p.start_time=None; p.errors=0; p.finished=false; p.keystroke_count=0; } drop(players);
+                                        let _ = room.tx.send(ServerMsg::StateChange { state: "waiting".to_string() }); room.broadcast_lobby().await; room.try_start_countdown().await;
+                                    }}
                                 }
                             }
                         }
@@ -609,34 +327,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     _ => {}
                 }
             }
-
-            // Room broadcast messages
-            room_msg = async {
-                if let Some(ref mut rx) = room_rx {
-                    rx.recv().await
-                } else {
-                    std::future::pending().await
-                }
-            } => {
-                match room_msg {
-                    Ok(msg) => {
-                        if let Ok(text) = serde_json::to_string(&msg) {
-                            if sender.send(Message::Text(text)).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                }
+            room_msg = async { if let Some(ref mut rx) = room_rx { rx.recv().await } else { std::future::pending().await } } => {
+                match room_msg { Ok(msg) => { if let Ok(text) = serde_json::to_string(&msg) { if sender.send(Message::Text(text)).await.is_err() { break; } } } Err(broadcast::error::RecvError::Closed) => break, Err(broadcast::error::RecvError::Lagged(_)) => continue }
             }
         }
     }
-
-    // Cleanup
-    if let Some(room_id) = &current_room {
-        if let Some(room) = state.rooms.get(room_id) {
-            room.remove_player(&player_id).await;
-        }
-    }
+    if let Some(room_id) = &current_room { if let Some(room) = state.rooms.get(room_id) { room.remove_player(&player_id).await; } }
 }
