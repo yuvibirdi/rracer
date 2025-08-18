@@ -131,11 +131,11 @@ pub fn App() -> impl IntoView {
                         let my_name_for_finish = player_name.clone();
                         
                         Closure::wrap(Box::new(move |e: web_sys::MessageEvent| {
-                            if let Ok(text) = e.data().dyn_into::<js_sys::JsString>() {
-                                let text: String = text.into();
+                            if let Some(text) = e.data().as_string() {
                                 if let Ok(msg) = serde_json::from_str::<ServerMsg>(&text) {
                                     match msg {
                                         ServerMsg::Lobby { players: p } => {
+                                            web_sys::console::log_1(&format!("Lobby update: {} players", p.len()).into());
                                             set_players.set(p);
                                         }
                                         ServerMsg::Countdown { passage: p } => {
@@ -221,6 +221,8 @@ pub fn App() -> impl IntoView {
                                             web_sys::console::error_1(&message.into());
                                         }
                                     }
+                                } else {
+                                    web_sys::console::error_1(&"Failed to parse ServerMsg JSON".into());
                                 }
                             }
                         }) as Box<dyn FnMut(_)>)
@@ -445,13 +447,17 @@ pub fn App() -> impl IntoView {
                             <div class="mb-6">
                                 <h3 class="text-lg font-semibold mb-3 text-gray-700">"Players in Room:"</h3>
                                 <div class="flex flex-wrap justify-center gap-3">
-                                    <For each=move || players.get().into_iter() key=|p| p.clone() children=move |player| {
-                                        view! {
-                                            <div class="bg-gradient-to-r from-sky-400 to-cyan-500 text-white px-4 py-2 rounded-full font-semibold shadow-lg">
-                                                {player}
-                                            </div>
+                                    <For
+                                        each=move || players.get().into_iter().enumerate()
+                                        key=|(i, p)| format!("{}-{}", i, p)
+                                        children=move |(_idx, player)| {
+                                            view! {
+                                                <div class="bg-gradient-to-r from-sky-400 to-cyan-500 text-white px-4 py-2 rounded-full font-semibold shadow-lg">
+                                                    {player}
+                                                </div>
+                                            }
                                         }
-                                    }/>
+                                    />
                                 </div>
                             </div>
                         </div>

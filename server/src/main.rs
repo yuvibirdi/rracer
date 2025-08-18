@@ -12,7 +12,6 @@ use futures::{sink::SinkExt, stream::StreamExt};
 use rust_fsm::StateMachineImpl;
 use shared::{
     fsm::{RracerEvent, RracerState},
-    passages::get_random_passage,
     protocol::{ClientMsg, ServerMsg},
     wpm::{accuracy, gross_wpm, net_wpm},
 };
@@ -28,9 +27,18 @@ use tokio::{
 use tower_http::{cors::CorsLayer, services::{ServeDir, ServeFile}};
 use tracing::{info, warn};
 use uuid::Uuid;
+mod db;
+use db::{get_random_passage as db_get_random_passage};
+use sqlx::PgPool;
 use rand::Rng;
 
 type Rooms = Arc<DashMap<String, Room>>;
+
+#[derive(Clone)]
+struct AppState {
+    rooms: Rooms,
+    db: Option<Arc<PgPool>>,
+}
 
 #[derive(Clone)]
 struct Player {
@@ -55,10 +63,11 @@ struct Room {
     waiting_start: Arc<RwLock<Option<u64>>>,
     last_timer_second: std::sync::atomic::AtomicU64,
     tx: broadcast::Sender<ServerMsg>,
+    db: Option<Arc<PgPool>>,
 }
 
 impl Room {
-    fn new(id: String) -> Self {
+    fn new(id: String, db: Option<Arc<PgPool>>) -> Self {
         let (tx, _) = broadcast::channel(100);
         Self {
             id,
@@ -69,6 +78,7 @@ impl Room {
             waiting_start: Arc::new(RwLock::new(None)),
             last_timer_second: std::sync::atomic::AtomicU64::new(0),
             tx,
+            db,
         }
     }
 
@@ -83,7 +93,8 @@ impl Room {
         if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::Join) {
             *state = new_state;
             *self.countdown_start.write().await = Some(current_timestamp());
-            *self.passage.write().await = Some(get_random_passage().to_string());
+                        let p = db_get_random_passage(self.db.as_deref()).await;
+                        *self.passage.write().await = Some(p);
 
             // Seed bots to reach at least 5 players total
             let total_now = players.len();
@@ -437,8 +448,17 @@ fn current_timestamp() -> u64 {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
+    // Optional DB
+    let db_url = std::env::var("DATABASE_URL").ok();
+    let db_pool: Option<Arc<PgPool>> = if let Some(url) = db_url {
+        match db::connect(&url).await {
+            Ok(pool) => Some(Arc::new(pool)),
+            Err(e) => { tracing::warn!("DB connection failed: {:?}", e); None }
+        }
+    } else { None };
 
     let rooms: Rooms = Arc::new(DashMap::new());
+    let app_state = AppState { rooms: rooms.clone(), db: db_pool.clone() };
 
     // Spawn tick loop
     let rooms_tick = rooms.clone();
@@ -457,7 +477,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Serve WASM dist with SPA fallback; assumes `web/dist` built via Trunk
         .nest_service("/", ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
         .layer(CorsLayer::permissive())
-        .with_state(rooms);
+    .with_state(app_state.clone());
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     info!("Server running on http://0.0.0.0:3000");
@@ -466,11 +486,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(rooms): State<Rooms>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, rooms))
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-async fn handle_socket(socket: WebSocket, rooms: Rooms) {
+async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
     let player_id = Uuid::new_v4().to_string();
     let mut current_room: Option<String> = None;
@@ -490,13 +510,14 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
                                 ClientMsg::Join { room, name } => {
                                     // Leave previous room
                                     if let Some(room_id) = &current_room {
-                                        if let Some(room) = rooms.get(room_id) {
+                                        if let Some(room) = state.rooms.get(room_id) {
                                             room.remove_player(&player_id).await;
                                         }
                                     }
 
                                     // Join the new room
-                                    let room = rooms.entry(room.clone()).or_insert_with(|| Room::new(room.clone()));
+                                    let db_for_room = state.db.clone();
+                                    let room = state.rooms.entry(room.clone()).or_insert_with(|| Room::new(room.clone(), db_for_room));
                                     room_rx = Some(room.tx.subscribe());
 
                                     let player = Player {
@@ -515,31 +536,41 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
                                     room.add_player(player).await;
                                     current_room = Some(room.id.clone());
                                     _player_name = Some(name);
+
+                                    // Immediately send a lobby snapshot directly to this client
+                                    // to ensure the UI syncs even if the broadcast is missed due to timing.
+                                    if let Ok(player_list_json) = {
+                                        let players_guard = room.players.read().await;
+                                        let player_names: Vec<String> = players_guard.values().map(|p| p.name.clone()).collect();
+                                        serde_json::to_string(&ServerMsg::Lobby { players: player_names })
+                                    } {
+                                        let _ = sender.send(Message::Text(player_list_json)).await;
+                                    }
                                 }
                                 ClientMsg::Key { ch, ts } => {
                                     if let Some(room_id) = &current_room {
-                                        if let Some(room) = rooms.get(room_id) {
+                                        if let Some(room) = state.rooms.get(room_id) {
                                             room.handle_keystroke(&player_id, ch, ts).await;
                                         }
                                     }
                                 }
                                 ClientMsg::Progress { pos, ts: _ } => {
                                     if let Some(room_id) = &current_room {
-                                        if let Some(room) = rooms.get(room_id) {
+                                        if let Some(room) = state.rooms.get(room_id) {
                                             room.update_player_progress(&player_id, pos).await;
                                         }
                                     }
                                 }
                                 ClientMsg::Finish { wpm, accuracy, time: _, ts: _ } => {
                                     if let Some(room_id) = &current_room {
-                                        if let Some(room) = rooms.get(room_id) {
+                                        if let Some(room) = state.rooms.get(room_id) {
                                             room.handle_player_finish(&player_id, wpm, accuracy).await;
                                         }
                                     }
                                 }
                                 ClientMsg::Reset => {
                                     if let Some(room_id) = &current_room {
-                                        if let Some(room) = rooms.get(room_id) {
+                                        if let Some(room) = state.rooms.get(room_id) {
                                             // Transition to waiting and clear race state
                                             if let Some(new_state) = {
                                                 let state = room.state.read().await.clone();
@@ -604,7 +635,7 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
 
     // Cleanup
     if let Some(room_id) = &current_room {
-        if let Some(room) = rooms.get(room_id) {
+        if let Some(room) = state.rooms.get(room_id) {
             room.remove_player(&player_id).await;
         }
     }

@@ -2,6 +2,7 @@
 name = "server"
 version = "0.1.0"
 edition = "2021"
+default-run = "server"
 
 [dependencies]
 shared = { path = "../shared" }
@@ -19,3 +20,7 @@ futures = "0.3"
 uuid = { version = "1.0", features = ["v4"] }
 rust-fsm = "0.8"
 rand = "0.8"
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "macros", "uuid", "chrono"] }
+reqwest = { version = "0.12", features = ["rustls-tls"] }
+scraper = "0.19"
+anyhow = "1"

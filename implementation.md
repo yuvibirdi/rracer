@@ -60,3 +60,41 @@ Verification
 - Lanes for both humans and bots should move; Progress IDs match names.
 - Reset returns to Waiting, removes bots, and requires 2 humans again for next race.
 
+—
+
+Passages via Postgres + web ingestion (Aug 2025)
+
+Goals
+
+- Store passages in Postgres instead of static code.
+- Ingest content from the web (URLs) into a passages table.
+- Refactor runtime to fetch a random passage from DB; fallback to in-code list if DB is empty/unavailable.
+
+Design
+
+- Use sqlx (runtime-tokio, postgres, rustls) for async DB access.
+- New table: passages(id SERIAL PRIMARY KEY, text TEXT NOT NULL, source_url TEXT, created_at TIMESTAMPTZ DEFAULT now()).
+- On server startup, ensure table exists.
+- Fetch random row: SELECT text FROM passages ORDER BY random() LIMIT 1.
+- Fallback: use existing static PASSAGES if DB returns 0 rows or on error.
+- Ingestion tool: standalone bin `server/bin/ingest.rs` to read URLs, fetch HTML (reqwest), extract <p> text (scraper), normalize, split into reasonable-length passages (e.g., 120–420 chars), and insert.
+
+Why not put DB code in shared/src/passages.rs?
+
+- The shared crate is compiled for WebAssembly (client) and cannot depend on native Postgres/reqwest.
+- We keep DB access in server; shared/passages.rs remains as a fallback utility only. Server no longer calls it unless DB is empty.
+
+Implementation checklist
+
+- [ ] Add dependencies: sqlx (postgres, runtime-tokio-rustls), reqwest, scraper.
+- [ ] server/src/db.rs: PgPool setup + ensure_table + fetch_random_passage(pool) -> Result<String>.
+- [ ] server main: introduce AppState { rooms, pool }, pass Arc<PgPool> into Room::new.
+- [ ] Replace get_random_passage() calls with DB-backed fetch + fallback to shared::passages.
+- [ ] Add server/bin/ingest.rs reading `urls.txt` and inserting passages.
+- [ ] Document DATABASE_URL usage and ingestion quickstart.
+
+Verification
+
+- With DATABASE_URL set and passages present, races use DB passages.
+- With empty DB or no DB, races still work using fallback static passages.
+

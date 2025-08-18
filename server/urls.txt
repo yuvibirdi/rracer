@@ -1,0 +1,31 @@
+# Public-domain sources for passage ingestion (Project Gutenberg HTML full-text pages)
+# Lines starting with # are ignored. One URL per line.
+# Curated for variety across genres; safe for parsing as standard HTML with <p> tags.
+
+https://www.gutenberg.org/files/98/98-h/98-h.htm
+
+# After verifying ingestion works, re-enable these (comments allowed; inline # will be stripped):
+https://www.gutenberg.org/files/1342/1342-h/1342-h.htm   # Pride and Prejudice — Jane Austen
+https://www.gutenberg.org/files/345/345-h/345-h.htm       # Dracula — Bram Stoker
+https://www.gutenberg.org/files/33/33-h/33-h.htm          # The Scarlet Letter — Nathaniel Hawthorne
+https://www.gutenberg.org/files/120/120-h/120-h.htm       # Treasure Island — Robert Louis Stevenson
+https://www.gutenberg.org/files/174/174-h/174-h.htm       # The Picture of Dorian Gray — Oscar Wilde
+https://www.gutenberg.org/files/36/36-h/36-h.htm          # The War of the Worlds — H. G. Wells
+https://www.gutenberg.org/files/35/35-h/35-h.htm          # The Time Machine — H. G. Wells
+https://www.gutenberg.org/files/5200/5200-h/5200-h.htm    # Metamorphosis — Franz Kafka
+https://www.gutenberg.org/files/208/208-h/208-h.htm       # Daisy Miller — Henry James
+https://www.gutenberg.org/files/2542/2542-h/2542-h.htm    # A Doll’s House — Henrik Ibsen
+https://www.gutenberg.org/files/11/11-h/11-h.htm          # Alice’s Adventures in Wonderland — Lewis Carroll
+https://www.gutenberg.org/files/84/84-h/84-h.htm          # Frankenstein — Mary Shelley
+https://www.gutenberg.org/files/1661/1661-h/1661-h.htm    # The Adventures of Sherlock Holmes — Arthur Conan Doyle
+https://www.gutenberg.org/files/2701/2701-h/2701-h.htm    # Moby-Dick — Herman Melville
+https://www.gutenberg.org/files/1400/1400-h/1400-h.htm    # Great Expectations — Charles Dickens
+https://www.gutenberg.org/files/1260/1260-h/1260-h.htm    # Jane Eyre — Charlotte Brontë
+https://www.gutenberg.org/files/1232/1232-h/1232-h.htm    # The Prince — Niccolò Machiavelli
+https://www.gutenberg.org/files/43/43-h/43-h.htm          # The Strange Case of Dr. Jekyll and Mr. Hyde — R. L. Stevenson
+https://www.gutenberg.org/files/844/844-h/844-h.htm       # The Importance of Being Earnest — Oscar Wilde
+https://www.gutenberg.org/files/55/55-h/55-h.htm          # The Wonderful Wizard of Oz — L. Frank Baum
+https://www.gutenberg.org/files/76/76-h/76-h.htm          # Adventures of Huckleberry Finn — Mark Twain
+https://www.gutenberg.org/files/74/74-h/74-h.htm          # The Adventures of Tom Sawyer — Mark Twain
+https://www.gutenberg.org/files/2814/2814-h/2814-h.htm    # Dubliners — James Joyce
+https://www.gutenberg.org/files/64317/64317-h/64317-h.htm # The Great Gatsby — F. Scott Fitzgerald
