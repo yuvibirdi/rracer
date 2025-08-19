@@ -13,6 +13,23 @@ thread_local! {
     static WS_REF: RefCell<Option<WebSocket>> = RefCell::new(None);
 }
 
+// Normalize typographic characters to simpler ASCII equivalents for comparison
+fn normalize_char(c: char) -> char {
+    match c {
+        // Curly single quotes/apostrophes → '
+    '\u{2018}' | '\u{2019}' | '\u{201B}' | '\u{2032}' | '\u{FF07}' => '\'',
+        // Curly double quotes → "
+    '\u{201C}' | '\u{201D}' | '\u{201F}' | '\u{2033}' | '\u{00AB}' | '\u{00BB}' | '\u{2039}' | '\u{203A}' | '\u{FF02}' => '"',
+        // Dashes and minus variants → -
+    '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}' | '\u{2212}' | '\u{FE58}' | '\u{FE63}' | '\u{FF0D}' | '\u{2043}' => '-',
+        // Ellipsis → treat as a single '.' for typing equivalence
+        '\u{2026}' => '.',
+        // Non‑breaking space → normal space
+    '\u{00A0}' | '\u{2007}' | '\u{202F}' | '\u{2000}' | '\u{2001}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}' | '\u{2008}' | '\u{2009}' | '\u{200A}' | '\u{205F}' | '\u{3000}' => ' ',
+        _ => c,
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let (game_state, set_game_state) = signal("waiting".to_string());
@@ -350,6 +367,7 @@ pub fn App() -> impl IntoView {
                         </div>
                         <div class="mb-4">
                             <h3 class="text-lg font-semibold mb-2 text-gray-700">"Type this passage:"</h3>
+                            <p class="text-xs text-gray-500 mb-2">"Tip: type straight quotes (\" '), hyphen (-), and space for curly quotes, long dashes, and non‑breaking spaces."</p>
                 <div id="typingArea" class="text-xl font-mono leading-relaxed p-6 bg-white rounded-lg border-2 border-gray-200 typing-area min-h-[120px] passage-text" tabindex="0"
                                 on:keydown=move |ev: web_sys::KeyboardEvent| {
                     // Only handle typing once the race has actually started
@@ -361,11 +379,15 @@ pub fn App() -> impl IntoView {
                                     // Only process single-character keys
                                     if key.chars().count() != 1 { return; }
                                     ev.prevent_default();
-                                    if let Some(ch) = key.chars().next() {
+                                    if let Some(ch_raw) = key.chars().next() {
+                                        // Normalize typed key (covers cases where browser reports a fancy char)
+                                        let ch = normalize_char(ch_raw);
                                         let passage_text = passage.get();
                                         let cur_pos = current_position.get();
                                         if let Some(expected_char) = passage_text.chars().nth(cur_pos) {
-                                            if ch == expected_char {
+                                            let typed_norm = ch;
+                                            let expected_norm = normalize_char(expected_char);
+                        if typed_norm == expected_norm {
                                                 let next_pos = cur_pos + 1;
                                                 set_current_position.set(next_pos);
 
@@ -512,6 +534,16 @@ pub fn App() -> impl IntoView {
                         <div class="text-center">
                             <button class="bg-green-500 text-white px-8 py-3 rounded-lg hover:bg-green-600 transition-colors font-semibold text-lg"
                                 on:click=move |_| {
+                                    // Optimistic local reset for snappy UX
+                                    set_game_state.set("waiting".to_string());
+                                    set_current_position.set(0);
+                                    set_errors.set(0);
+                                    set_wpm.set(0.0);
+                                    set_accuracy.set(100.0);
+                                    set_time_elapsed.set(0.0);
+                                    set_finish_time.set(None);
+                                    set_leaderboard.set(Vec::new());
+                                    set_player_positions.set(HashMap::new());
                                     WS_REF.with(|cell| {
                                         if let Some(ws) = cell.borrow().as_ref() {
                                             let msg = ClientMsg::Reset;

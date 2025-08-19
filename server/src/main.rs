@@ -63,6 +63,7 @@ struct Room {
     countdown_start: Arc<RwLock<Option<u64>>>,
     waiting_start: Arc<RwLock<Option<u64>>>,
     last_timer_second: std::sync::atomic::AtomicU64,
+    race_epoch: Arc<std::sync::atomic::AtomicU64>,
     tx: broadcast::Sender<ServerMsg>,
     db: Option<Arc<PgPool>>,
 }
@@ -78,6 +79,7 @@ impl Room {
             countdown_start: Arc::new(RwLock::new(None)),
             waiting_start: Arc::new(RwLock::new(None)),
             last_timer_second: std::sync::atomic::AtomicU64::new(0),
+            race_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tx,
             db,
         }
@@ -221,6 +223,8 @@ impl Room {
                         let mut state = self.state.write().await;
                         if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::CountdownElapsed) {
                             *state = new_state;
+                            // New race epoch to cancel any stale bot tasks
+                            let _ = self.race_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             let t0 = current_timestamp();
                             let _ = self.tx.send(ServerMsg::StateChange { state: "racing".to_string() });
                             if let Some(passage) = self.passage.read().await.as_ref() {
@@ -263,15 +267,26 @@ impl Room {
         let tx = self.tx.clone();
         let players_arc = self.players.clone();
         let state_arc = self.state.clone();
+        let epoch_now = self.race_epoch.load(std::sync::atomic::Ordering::Relaxed);
+        let epoch_arc = self.race_epoch.clone();
         if let Some(passage) = passage_opt {
             let len = passage.len();
             let snapshot: Vec<(String, String, f64)> = { let guard = players_arc.read().await; guard.iter().filter_map(|(id,p)| if p.is_bot { Some((id.clone(), p.name.clone(), p.bot_speed_wpm.unwrap_or(60.0))) } else { None }).collect() };
             for (bot_id, name, speed) in snapshot.into_iter() {
                 let tx_clone = tx.clone(); let players_arc_clone = players_arc.clone(); let state_arc_clone = state_arc.clone();
                 let cps = speed * 5.0 / 60.0;
+                let epoch_arc_clone = epoch_arc.clone();
+                let epoch_val = epoch_now;
                 tokio::spawn(async move {
                     let mut pos: f64 = 0.0; let mut last = current_timestamp(); let tick = Duration::from_millis(100);
-                    loop { tokio::time::sleep(tick).await; let now = current_timestamp(); let dt = (now - last) as f64 / 1000.0; last = now; pos += cps * dt; let mut ipos = pos.floor() as usize; if ipos > len { ipos = len; } let _ = tx_clone.send(ServerMsg::Progress { id: name.clone(), pos: ipos }); if ipos >= len { let wpm = speed; let acc = 100.0; let _ = tx_clone.send(ServerMsg::Finish { id: name.clone(), wpm, accuracy: acc }); { let mut guard = players_arc_clone.write().await; if let Some(p) = guard.get_mut(&bot_id) { p.finished = true; p.position = len; } let all_finished = guard.values().all(|p| p.finished); if all_finished && !guard.is_empty() { } } break; } }
+                    loop {
+                        tokio::time::sleep(tick).await;
+                        // Cancel if a new race epoch started
+                        if epoch_arc_clone.load(std::sync::atomic::Ordering::Relaxed) != epoch_val { break; }
+                        let now = current_timestamp(); let dt = (now - last) as f64 / 1000.0; last = now; pos += cps * dt; let mut ipos = pos.floor() as usize; if ipos > len { ipos = len; }
+                        let _ = tx_clone.send(ServerMsg::Progress { id: name.clone(), pos: ipos });
+                        if ipos >= len { let wpm = speed; let acc = 100.0; let _ = tx_clone.send(ServerMsg::Finish { id: name.clone(), wpm, accuracy: acc }); { let mut guard = players_arc_clone.write().await; if let Some(p) = guard.get_mut(&bot_id) { p.finished = true; p.position = len; } let all_finished = guard.values().all(|p| p.finished); if all_finished && !guard.is_empty() { } } break; }
+                    }
                     let done = { let guard = players_arc_clone.read().await; guard.values().all(|p| p.finished) && !guard.is_empty() };
                     if done { if let Ok(mut state) = state_arc_clone.try_write() { if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::AllDone) { *state = new_state; let _ = tx_clone.send(ServerMsg::StateChange { state: "finished".to_string() }); } } else { let _ = tx_clone.send(ServerMsg::StateChange { state: "finished".to_string() }); } }
                 });
@@ -365,10 +380,23 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 ClientMsg::Reset => {
                                     if let Some(room_id) = &current_room { if let Some(room_g) = state.rooms.get(room_id) {
                                         let room = room_g.value().clone(); drop(room_g);
-                                        if let Some(new_state) = { let state = room.state.read().await.clone(); RracerState::transition(&state, &RracerEvent::Reset) } { let mut state_w = room.state.write().await; *state_w = new_state; }
-                                        *room.passage.write().await = None; *room.countdown_start.write().await = None; *room.waiting_start.write().await = None; room.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
-                                        let mut players = room.players.write().await; players.retain(|_,p| !p.is_bot); for p in players.values_mut() { p.position=0; p.start_time=None; p.errors=0; p.finished=false; p.keystroke_count=0; } drop(players);
-                                        let _ = room.tx.send(ServerMsg::StateChange { state: "waiting".to_string() }); room.broadcast_lobby().await; room.try_start_countdown().await;
+                                        // Only allow reset when the room is actually Finished
+                                        let can_reset = { let s = room.state.read().await.clone(); s == RracerState::Finished };
+                                        if can_reset {
+                                            if let Some(new_state) = { let state = room.state.read().await.clone(); RracerState::transition(&state, &RracerEvent::Reset) } {
+                                                let mut state_w = room.state.write().await; *state_w = new_state;
+                                                // Bump race epoch to cancel any lingering bot tasks
+                                                let _ = room.race_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                                *room.passage.write().await = None; *room.countdown_start.write().await = None; *room.waiting_start.write().await = None; room.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                let mut players = room.players.write().await; players.retain(|_,p| !p.is_bot); for p in players.values_mut() { p.position=0; p.start_time=None; p.errors=0; p.finished=false; p.keystroke_count=0; } drop(players);
+                                                let _ = room.tx.send(ServerMsg::StateChange { state: "waiting".to_string() }); room.broadcast_lobby().await; room.try_start_countdown().await;
+                                            }
+                                        } else {
+                                            // Send a targeted error back to this client; don't disturb others
+                                            if let Ok(text) = serde_json::to_string(&ServerMsg::Error { message: "Cannot reset until the race is finished".to_string() }) {
+                                                let _ = sender.send(Message::Text(text)).await;
+                                            }
+                                        }
                                     }}
                                 }
                             }
