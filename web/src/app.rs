@@ -355,27 +355,34 @@ pub fn App() -> impl IntoView {
                     // Only handle typing once the race has actually started
                     if game_state.get() != "racing" { return; }
                     if start_time.get().is_none() { return; }
+                                    // Ignore modifier combos and non-character keys
+                                    if ev.ctrl_key() || ev.meta_key() || ev.alt_key() { return; }
                                     let key = ev.key();
+                                    // Only process single-character keys
+                                    if key.chars().count() != 1 { return; }
+                                    ev.prevent_default();
                                     if let Some(ch) = key.chars().next() {
                                         let passage_text = passage.get();
-                                        if let Some(expected_char) = passage_text.chars().nth(current_position.get()) {
+                                        let cur_pos = current_position.get();
+                                        if let Some(expected_char) = passage_text.chars().nth(cur_pos) {
                                             if ch == expected_char {
-                                                set_current_position.update(|pos| *pos += 1);
+                                                let next_pos = cur_pos + 1;
+                                                set_current_position.set(next_pos);
 
                                                 // Update local car position immediately
                                                 let me = player_name.get();
-                                                let my_pos = current_position.get();
-                                                set_player_positions.update(|m| { m.insert(me.clone(), my_pos); });
+                                                set_player_positions.update(|m| { m.insert(me.clone(), next_pos); });
 
-                                                // Update realtime WPM & accuracy
+                        // Update realtime WPM & accuracy
                                                 if let Some(start) = start_time.get() {
                                                     let now = js_sys::Date::now();
-                                                    let elapsed = (now - start) / 1000.0; // seconds (server-synced)
+                                                    // seconds (server-synced), clamp to avoid zero/negative due to clock skew
+                                                    let elapsed = ((now - start) / 1000.0).max(0.1);
                                                     if elapsed > 0.0 {
-                                                        let chars_typed = current_position.get();
-                                                        let gross_wpm = (chars_typed as f64 / 5.0) / (elapsed / 60.0);
-                                                        let net_wpm = gross_wpm - (errors.get() as f64 * 60.0 / elapsed);
-                                                        set_wpm.set(net_wpm.max(0.0));
+                                                        // Monkeytype-style WPM: only correct chars, no error penalty subtraction
+                                                        let chars_typed = next_pos;
+                                                        let wpm_now = (chars_typed as f64 / 5.0) / (elapsed / 60.0);
+                            set_wpm.set(wpm_now.max(0.0));
 
                                                         let total_chars = chars_typed + errors.get();
                                                         if total_chars > 0 { set_accuracy.set((chars_typed as f64 / total_chars as f64) * 100.0); }
@@ -385,7 +392,7 @@ pub fn App() -> impl IntoView {
                                                     if now - last >= 100.0 {
                                                         WS_REF.with(|cell| {
                                                             if let Some(ws) = cell.borrow().as_ref() {
-                                                                let msg = ClientMsg::Progress { pos: current_position.get(), ts: now as u64 };
+                                                                let msg = ClientMsg::Progress { pos: next_pos, ts: now as u64 };
                                                                 if let Ok(json) = serde_json::to_string(&msg) { let _ = ws.send_with_str(&json); }
                                                             }
                                                         });
@@ -394,12 +401,17 @@ pub fn App() -> impl IntoView {
                                                 }
 
                                                 // If finished, send Finish
-                        if current_position.get() >= passage_text.chars().count() {
+                        if next_pos >= passage_text.chars().count() {
                                                     if let Some(start) = start_time.get() {
                                                         let now = js_sys::Date::now();
-                                                        let elapsed = (now - start) / 1000.0; // seconds
-                                                        let w = wpm.get();
-                                                        let a = accuracy.get();
+                                                        // seconds (server-synced), clamp
+                                                        let elapsed = ((now - start) / 1000.0).max(0.1);
+                            // Recompute WPM/accuracy at finish to avoid stale 0s
+                                                        let chars_typed = next_pos;
+                            let w = if elapsed > 0.0 { (chars_typed as f64 / 5.0) / (elapsed / 60.0) } else { 0.0 };
+                            let a = if (chars_typed + errors.get()) > 0 { (chars_typed as f64 / (chars_typed + errors.get()) as f64) * 100.0 } else { 100.0 };
+                            set_wpm.set(w.max(0.0));
+                            set_accuracy.set(a);
                             set_finish_time.set(Some(elapsed));
                                                         WS_REF.with(|cell| {
                                                             if let Some(ws) = cell.borrow().as_ref() {

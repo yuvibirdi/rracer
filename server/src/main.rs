@@ -33,7 +33,7 @@ use uuid::Uuid;
 mod db;
 use db::get_random_passage as db_get_random_passage;
 
-type Rooms = Arc<DashMap<String, Room>>;
+type Rooms = Arc<DashMap<String, Arc<Room>>>;
 
 #[derive(Clone)]
 struct AppState {
@@ -84,54 +84,54 @@ impl Room {
     }
 
     async fn try_start_countdown(&self) {
-        let mut state = self.state.write().await;
-        if *state != RracerState::Waiting { return; }
-        let mut players = self.players.write().await;
-        let human_count = players.values().filter(|p| !p.is_bot).count();
-        if human_count < 2 { return; }
+        info!("Room {} try_start_countdown: entered", self.id);
+        // Check state and human count without holding locks across awaits
+        {
+            let state_now = *self.state.read().await;
+            info!("Room {} try_start_countdown: state = {:?}", self.id, state_now);
+            if state_now != RracerState::Waiting { return; }
+        }
+        let human_count = { let g = self.players.read().await; g.values().filter(|p| !p.is_bot).count() };
+        info!("Room {} try_start_countdown: humans = {}", self.id, human_count);
+        if human_count < 2 {
+            info!("Room {} not starting: humans = {} (<2)", self.id, human_count);
+            return;
+        }
 
-        if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::Join) {
-            *state = new_state;
+        // Transition to countdown and set t0
+        if let Some(new_state) = { let s = self.state.read().await.clone(); RracerState::transition(&s, &RracerEvent::Join) } {
+            { let mut sw = self.state.write().await; *sw = new_state; }
             *self.countdown_start.write().await = Some(current_timestamp());
             let p = db_get_random_passage(self.db.as_deref()).await;
             *self.passage.write().await = Some(p);
 
             // Seed bots up to 5 total
-            let total_now = players.len();
-            let needed = 5usize.saturating_sub(total_now);
-            for i in 0..needed {
-                let mut rng = rand::thread_rng();
-                let wpm: f64 = rng.gen_range(40.0..90.0);
-                let bot_id = format!("bot-{}-{}-{}", self.id, i, Uuid::new_v4());
-                let bot_name = format!("Bot {}", i + 1);
-                let bot = Player {
-                    id: bot_id.clone(),
-                    name: bot_name,
-                    position: 0,
-                    start_time: None,
-                    last_keystroke: 0,
-                    errors: 0,
-                    finished: false,
-                    keystroke_count: 0,
-                    is_bot: true,
-                    bot_speed_wpm: Some(wpm),
-                };
-                players.insert(bot_id, bot);
+            {
+                let mut players = self.players.write().await;
+                let total_now = players.len();
+                let needed = 5usize.saturating_sub(total_now);
+                for i in 0..needed {
+                    let mut rng = rand::thread_rng();
+                    let wpm: f64 = rng.gen_range(40.0..90.0);
+                    let bot_id = format!("bot-{}-{}-{}", self.id, i, Uuid::new_v4());
+                    let bot_name = format!("Bot {}", i + 1);
+                    let bot = Player { id: bot_id.clone(), name: bot_name, position: 0, start_time: None, last_keystroke: 0, errors: 0, finished: false, keystroke_count: 0, is_bot: true, bot_speed_wpm: Some(wpm) };
+                    players.insert(bot_id, bot);
+                }
             }
 
-            drop(players);
             self.broadcast_lobby().await;
             let _ = self.tx.send(ServerMsg::StateChange { state: "countdown".to_string() });
-            if let Some(p) = self.passage.read().await.as_ref() { let _ = self.tx.send(ServerMsg::Countdown { passage: p.clone() }); }
+            if let Some(p) = self.passage.read().await.as_ref() { let preview: String = p.chars().take(60).collect(); info!("Room {} countdown, passage preview: {}...", self.id, preview); let _ = self.tx.send(ServerMsg::Countdown { passage: p.clone() }); }
             info!("Room {} starting countdown with >=2 humans", self.id);
         }
     }
 
     async fn add_player(&self, player: Player) {
         info!("Adding player {} to room {}", player.name, self.id);
-        let mut players = self.players.write().await;
-        players.insert(player.id.clone(), player);
-        info!("Room {} now has {} players", self.id, players.len());
+    let mut players = self.players.write().await;
+    players.insert(player.id.clone(), player);
+    info!("Room {} now has {} players", self.id, players.len());
 
         if players.len() >= 1 {
             let mut state = self.state.write().await;
@@ -147,9 +147,11 @@ impl Room {
                 }
             }
         }
-        drop(players);
-        self.broadcast_lobby().await;
-        self.try_start_countdown().await;
+    // Broadcast lobby immediately so all clients see both players
+    drop(players);
+    self.broadcast_lobby().await;
+    // Fast path: if 2+ humans, try to start countdown
+    self.try_start_countdown().await;
     }
 
     async fn remove_player(&self, player_id: &str) {
@@ -207,9 +209,28 @@ impl Room {
     async fn tick(&self) {
         let current_state = *self.state.read().await;
         match current_state {
-            RracerState::Waiting => { /* waiting handled in add/remove */ }
+            RracerState::Waiting => {
+                // Retry starting countdown if somehow missed on join
+                let humans = { let g = self.players.read().await; g.values().filter(|p| !p.is_bot).count() };
+                if humans >= 2 { self.try_start_countdown().await; }
+            }
             RracerState::Countdown => {
-                if let Some(start_time) = *self.countdown_start.read().await { let elapsed = current_timestamp() - start_time; if elapsed >= 3000 { let mut state = self.state.write().await; if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::CountdownElapsed) { *state = new_state; if let Some(passage) = self.passage.read().await.as_ref() { let _ = self.tx.send(ServerMsg::Start { passage: passage.clone(), t0: current_timestamp(), }); } self.start_bots().await; info!("Room {} started racing", self.id); } } }
+                if let Some(start_time) = *self.countdown_start.read().await {
+                    let elapsed = current_timestamp() - start_time;
+                    if elapsed >= 3000 {
+                        let mut state = self.state.write().await;
+                        if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::CountdownElapsed) {
+                            *state = new_state;
+                            let t0 = current_timestamp();
+                            let _ = self.tx.send(ServerMsg::StateChange { state: "racing".to_string() });
+                            if let Some(passage) = self.passage.read().await.as_ref() {
+                                let _ = self.tx.send(ServerMsg::Start { passage: passage.clone(), t0 });
+                            }
+                            self.start_bots().await;
+                            info!("Room {} started racing", self.id);
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -264,12 +285,38 @@ fn current_timestamp() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unw
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
+    // Load .env if present
+    let _ = dotenvy::dotenv();
     let db_url = std::env::var("DATABASE_URL").ok();
-    let db_pool: Option<Arc<PgPool>> = if let Some(url) = db_url { match db::connect(&url).await { Ok(pool) => Some(Arc::new(pool)), Err(e) => { tracing::warn!("DB connection failed: {:?}", e); None } } } else { None };
+    let db_pool: Option<Arc<PgPool>> = if let Some(url) = db_url {
+        match db::connect(&url).await {
+            Ok(pool) => {
+                tracing::info!("db_connected = true");
+                Some(Arc::new(pool))
+            }
+            Err(e) => {
+                tracing::warn!("db_connect_failed = {:?}", e);
+                None
+            }
+        }
+    } else {
+        tracing::warn!("database_url_missing = true; using static passages fallback");
+        None
+    };
     let rooms: Rooms = Arc::new(DashMap::new());
     let app_state = AppState { rooms: rooms.clone(), db: db_pool.clone() };
     let rooms_tick = rooms.clone();
-    tokio::spawn(async move { let mut interval = interval(Duration::from_millis(50)); loop { interval.tick().await; for room in rooms_tick.iter() { room.value().tick().await; } } });
+    tokio::spawn(async move {
+        let mut interval = interval(Duration::from_millis(50));
+        loop {
+            interval.tick().await;
+            // Clone Arc<Room> values and drop guards before awaiting
+            let rooms_to_tick: Vec<Arc<Room>> = rooms_tick.iter().map(|r| r.value().clone()).collect();
+            for r in rooms_to_tick {
+                r.tick().await;
+            }
+        }
+    });
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .nest_service("/", ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
@@ -300,20 +347,24 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 ClientMsg::Join { room, name } => {
                                     if let Some(room_id) = &current_room { if let Some(room) = state.rooms.get(room_id) { room.remove_player(&player_id).await; } }
                                     let db_for_room = state.db.clone();
-                                    let room = state.rooms.entry(room.clone()).or_insert_with(|| Room::new(room.clone(), db_for_room));
-                                    room_rx = Some(room.tx.subscribe());
+                                    let room_arc: Arc<Room> = {
+                                        let entry = state.rooms.entry(room.clone()).or_insert_with(|| Arc::new(Room::new(room.clone(), db_for_room)));
+                                        entry.clone()
+                                    };
+                                    room_rx = Some(room_arc.tx.subscribe());
                                     let player = Player { id: player_id.clone(), name: name.clone(), position:0, start_time: None, last_keystroke:0, errors:0, finished:false, keystroke_count:0, is_bot:false, bot_speed_wpm: None };
-                                    room.add_player(player).await;
-                                    current_room = Some(room.id.clone());
+                                    room_arc.add_player(player).await;
+                                    current_room = Some(room_arc.id.clone());
                                     _player_name = Some(name);
                                     // Direct lobby snapshot for the joiner
-                                    if let Ok(text) = { let g = room.players.read().await; let names: Vec<String> = g.values().map(|p| p.name.clone()).collect(); serde_json::to_string(&ServerMsg::Lobby { players: names }) } { let _ = sender.send(Message::Text(text)).await; }
+                                    if let Ok(text) = { let g = room_arc.players.read().await; let names: Vec<String> = g.values().map(|p| p.name.clone()).collect(); serde_json::to_string(&ServerMsg::Lobby { players: names }) } { let _ = sender.send(Message::Text(text)).await; }
                                 }
-                                ClientMsg::Key { ch, ts } => { if let Some(room_id) = &current_room { if let Some(room) = state.rooms.get(room_id) { room.handle_keystroke(&player_id, ch, ts).await; } } }
-                                ClientMsg::Progress { pos, ts: _ } => { if let Some(room_id) = &current_room { if let Some(room) = state.rooms.get(room_id) { room.update_player_progress(&player_id, pos).await; } } }
-                                ClientMsg::Finish { wpm, accuracy, time: _, ts: _ } => { if let Some(room_id) = &current_room { if let Some(room) = state.rooms.get(room_id) { room.handle_player_finish(&player_id, wpm, accuracy).await; } } }
+                                ClientMsg::Key { ch, ts } => { if let Some(room_id) = &current_room { if let Some(room_g) = state.rooms.get(room_id) { let room = room_g.value().clone(); drop(room_g); room.handle_keystroke(&player_id, ch, ts).await; } } }
+                                ClientMsg::Progress { pos, ts: _ } => { if let Some(room_id) = &current_room { if let Some(room_g) = state.rooms.get(room_id) { let room = room_g.value().clone(); drop(room_g); room.update_player_progress(&player_id, pos).await; } } }
+                                ClientMsg::Finish { wpm, accuracy, time: _, ts: _ } => { if let Some(room_id) = &current_room { if let Some(room_g) = state.rooms.get(room_id) { let room = room_g.value().clone(); drop(room_g); room.handle_player_finish(&player_id, wpm, accuracy).await; } } }
                                 ClientMsg::Reset => {
-                                    if let Some(room_id) = &current_room { if let Some(room) = state.rooms.get(room_id) {
+                                    if let Some(room_id) = &current_room { if let Some(room_g) = state.rooms.get(room_id) {
+                                        let room = room_g.value().clone(); drop(room_g);
                                         if let Some(new_state) = { let state = room.state.read().await.clone(); RracerState::transition(&state, &RracerEvent::Reset) } { let mut state_w = room.state.write().await; *state_w = new_state; }
                                         *room.passage.write().await = None; *room.countdown_start.write().await = None; *room.waiting_start.write().await = None; room.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
                                         let mut players = room.players.write().await; players.retain(|_,p| !p.is_bot); for p in players.values_mut() { p.position=0; p.start_time=None; p.errors=0; p.finished=false; p.keystroke_count=0; } drop(players);
@@ -332,5 +383,5 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
         }
     }
-    if let Some(room_id) = &current_room { if let Some(room) = state.rooms.get(room_id) { room.remove_player(&player_id).await; } }
+    if let Some(room_id) = &current_room { if let Some(room_g) = state.rooms.get(room_id) { let room = room_g.value().clone(); drop(room_g); room.remove_player(&player_id).await; } }
 }

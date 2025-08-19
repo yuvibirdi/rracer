@@ -25,15 +25,23 @@ pub async fn connect(url: &str) -> anyhow::Result<PgPool> {
 /// Get a random passage from DB if available; otherwise fall back to static list.
 pub async fn get_random_passage(db: Option<&PgPool>) -> String {
     if let Some(pool) = db {
-        if let Ok(row) = sqlx::query_scalar::<_, String>(
+        match sqlx::query_scalar::<_, String>(
             "SELECT text FROM passages ORDER BY random() LIMIT 1",
         )
         .fetch_one(pool)
-        .await
-        {
-            return row;
+        .await {
+            Ok(row) => {
+                tracing::info!("passage_source = db");
+                return row;
+            }
+            Err(e) => {
+                tracing::warn!("db_passage_fetch_failed = {:?}", e);
+            }
         }
+    } else {
+        tracing::warn!("db_unavailable_for_passage = true");
     }
     // Fallback to static
+    tracing::error!("passage_source = fallback_static");
     shared::passages::get_random_passage().to_string()
 }
