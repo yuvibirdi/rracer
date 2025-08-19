@@ -1,5 +1,5 @@
 mod app;
-mod websocket;
+pub mod normalize;
 
 use app::App;
 use leptos::prelude::*;

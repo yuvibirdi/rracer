@@ -5,30 +5,12 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlElement, WebSocket};
 use std::cell::RefCell;
+use crate::normalize::{normalize_char, is_skippable};
 // no std::rc needed
 
 // Thread-local storage for the active WebSocket. This avoids capturing non-Send/Sync
 // types inside Leptos children closures, which require Fn + Send + Sync.
-thread_local! {
-    static WS_REF: RefCell<Option<WebSocket>> = RefCell::new(None);
-}
-
-// Normalize typographic characters to simpler ASCII equivalents for comparison
-fn normalize_char(c: char) -> char {
-    match c {
-        // Curly single quotes/apostrophes → '
-    '\u{2018}' | '\u{2019}' | '\u{201B}' | '\u{2032}' | '\u{FF07}' => '\'',
-        // Curly double quotes → "
-    '\u{201C}' | '\u{201D}' | '\u{201F}' | '\u{2033}' | '\u{00AB}' | '\u{00BB}' | '\u{2039}' | '\u{203A}' | '\u{FF02}' => '"',
-        // Dashes and minus variants → -
-    '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}' | '\u{2212}' | '\u{FE58}' | '\u{FE63}' | '\u{FF0D}' | '\u{2043}' => '-',
-        // Ellipsis → treat as a single '.' for typing equivalence
-        '\u{2026}' => '.',
-        // Non‑breaking space → normal space
-    '\u{00A0}' | '\u{2007}' | '\u{202F}' | '\u{2000}' | '\u{2001}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}' | '\u{2008}' | '\u{2009}' | '\u{200A}' | '\u{205F}' | '\u{3000}' => ' ',
-        _ => c,
-    }
-}
+thread_local! { static WS_REF: RefCell<Option<WebSocket>> = const { RefCell::new(None) }; }
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -52,14 +34,16 @@ pub fn App() -> impl IntoView {
     let (connecting, set_connecting) = signal(false);
     let (finish_time, set_finish_time) = signal(None::<f64>);
     let (leaderboard, set_leaderboard) = signal(Vec::<(String, f64, f64)>::new());
+    let (test_mode, set_test_mode) = signal(false);
+    let (debug_flag, set_debug_flag) = signal(false);
     
     // WebSocket is managed via thread-local storage (WS_REF)
 
     // Lightweight timer loop: update elapsed time every 100ms using server t0
     {
-        let game_state_sig = game_state.clone();
-        let start_time_sig = start_time.clone();
-        let set_time_elapsed_sig = set_time_elapsed.clone();
+        let game_state_sig = game_state;
+        let start_time_sig = start_time;
+        let set_time_elapsed_sig = set_time_elapsed;
         if let Some(win) = web_sys::window() {
             let cb = Closure::wrap(Box::new(move || {
                 if game_state_sig.get_untracked() == "racing" {
@@ -84,18 +68,18 @@ pub fn App() -> impl IntoView {
             let host = loc.host().unwrap();
             let protocol = loc.protocol().unwrap_or_else(|_| "http:".into());
             let ws_scheme = if protocol == "https:" { "wss" } else { "ws" };
-            let ws_url = format!("{}://{}/ws", ws_scheme, host);
+            let ws_url = format!("{ws_scheme}://{host}/ws");
             
             match WebSocket::new(&ws_url) {
                 Ok(ws) => {
                     set_connecting.set(true);
                     // Join on open; mark as connected then
                     {
-                        let room_name_sig = room_name.clone();
-                        let player_name_sig = player_name.clone();
-                        let set_connected_cb = set_connected.clone();
-                        let set_joined_cb = set_joined.clone();
-                        let set_connecting_cb = set_connecting.clone();
+                        let room_name_sig = room_name;
+                        let player_name_sig = player_name;
+                        let set_connected_cb = set_connected;
+                        let set_joined_cb = set_joined;
+                        let set_connecting_cb = set_connecting;
                         let onopen = Closure::wrap(Box::new(move || {
                             set_connected_cb.set(true);
                             set_connecting_cb.set(false);
@@ -115,10 +99,10 @@ pub fn App() -> impl IntoView {
 
                     // Handle close -> mark disconnected
                     {
-                        let set_connected_cb = set_connected.clone();
-                        let set_state_cb = set_game_state.clone();
-                        let set_joined_cb = set_joined.clone();
-                        let set_connecting_cb = set_connecting.clone();
+                        let set_connected_cb = set_connected;
+                        let set_state_cb = set_game_state;
+                        let set_joined_cb = set_joined;
+                        let set_connecting_cb = set_connecting;
                         let onclose = Closure::wrap(Box::new(move |_e: web_sys::CloseEvent| {
                             set_connected_cb.set(false);
                             set_state_cb.set("waiting".to_string());
@@ -130,26 +114,31 @@ pub fn App() -> impl IntoView {
                     }
                     // Set up message handler
                     let onmessage_callback = {
-                        let set_players = set_players.clone();
-                        let set_passage = set_passage.clone();
-                        let set_game_state = set_game_state.clone();
-                        let set_start_time = set_start_time.clone();
-                        let set_current_position = set_current_position.clone();
-                        let set_errors = set_errors.clone();
-                        let set_player_positions = set_player_positions.clone();
-                        let set_wpm = set_wpm.clone();
-                        let set_accuracy = set_accuracy.clone();
-                        let set_time_elapsed_cb = set_time_elapsed.clone();
-                        let set_error_message = set_error_message.clone();
-                        let set_player_positions2 = set_player_positions.clone();
-                        let player_name_signal = player_name.clone();
-                        let set_leaderboard_cb = set_leaderboard.clone();
-                        let set_finish_time_cb = set_finish_time.clone();
-                        let my_name_for_finish = player_name.clone();
+                        let set_players = set_players;
+                        let set_passage = set_passage;
+                        let set_game_state = set_game_state;
+                        let set_start_time = set_start_time;
+                        let set_current_position = set_current_position;
+                        let set_errors = set_errors;
+                        let set_player_positions = set_player_positions;
+                        let set_wpm = set_wpm;
+                        let set_accuracy = set_accuracy;
+                        let set_time_elapsed_cb = set_time_elapsed;
+                        let set_error_message = set_error_message;
+                        let set_player_positions2 = set_player_positions;
+                        let player_name_signal = player_name;
+                        let set_leaderboard_cb = set_leaderboard;
+                        let set_finish_time_cb = set_finish_time;
+                        let my_name_for_finish = player_name;
+                        let test_mode_sig = test_mode;
                         
                         Closure::wrap(Box::new(move |e: web_sys::MessageEvent| {
                             if let Some(text) = e.data().as_string() {
                                 if let Ok(msg) = serde_json::from_str::<ServerMsg>(&text) {
+                                    if test_mode_sig.get_untracked() {
+                                        // Ignore server-driven flow while in local test mode, except errors
+                                        if !matches!(msg, ServerMsg::Error { .. }) { return; }
+                                    }
                                     match msg {
                                         ServerMsg::Lobby { players: p } => {
                                             web_sys::console::log_1(&format!("Lobby update: {} players", p.len()).into());
@@ -202,7 +191,7 @@ pub fn App() -> impl IntoView {
                                             });
                                         }
                                         ServerMsg::Finish { id, wpm: player_wpm, accuracy: player_accuracy } => {
-                                            web_sys::console::log_1(&format!("Player {} finished with {} WPM, {}% accuracy", id, player_wpm, player_accuracy).into());
+                                            web_sys::console::log_1(&format!("Player {id} finished with {player_wpm} WPM, {player_accuracy}% accuracy").into());
                                             // Update leaderboard, append in arrival order
                                             set_leaderboard_cb.update(|lb| lb.push((id.clone(), player_wpm, player_accuracy)));
                                             // If this is me, update my stats and move to finished state
@@ -296,6 +285,31 @@ pub fn App() -> impl IntoView {
                             prop:disabled=move || joined.get() || connecting.get()>
                             {move || if joined.get() { "Joined" } else if connected.get() { "Join Room" } else { "Connect & Join" }}
                         </button>
+                        <button class="bg-gray-700 text-white px-6 py-3 rounded-lg hover:bg-gray-800 transition-colors font-semibold"
+                            on:click=move |_| {
+                                set_test_mode.set(true);
+                                set_passage.set(crate::normalize::tests_passage());
+                                set_game_state.set("racing".to_string());
+                                set_start_time.set(Some(js_sys::Date::now()));
+                                set_current_position.set(0);
+                                set_errors.set(0);
+                                set_wpm.set(0.0);
+                                set_accuracy.set(100.0);
+                                set_last_progress_sent.set(0.0);
+                                set_player_positions.set(HashMap::new());
+                                let me = player_name.get();
+                                set_players.set(vec![me.clone()]);
+                                set_player_positions.update(|m| { m.insert(me, 0); });
+                                set_waiting_seconds.set(0);
+                                set_finish_time.set(None);
+                                set_leaderboard.set(Vec::new());
+                            }>
+                            {move || if test_mode.get() { "Test Text Loaded" } else { "Load Test Text" }}
+                        </button>
+                        <button class="bg-gray-600 text-white px-4 py-3 rounded-lg hover:bg-gray-700 transition-colors font-semibold"
+                            on:click=move |_| { set_debug_flag.update(|d| *d = !*d); }>
+                            {move || if debug_flag.get() { "Debug: ON" } else { "Debug: OFF" }}
+                        </button>
                     </div>
                     <div class="text-sm text-gray-600">
                         "Status: "<span class="font-semibold">{move || if connected.get() { "Connected".to_string() } else { "Disconnected".to_string() }}</span>
@@ -335,7 +349,7 @@ pub fn App() -> impl IntoView {
                             <div class="finish-line"></div>
                             <For
                                 each=move || players.get().into_iter().enumerate()
-                                key=|(i, p)| format!("{}-{}", i, p)
+                                key=|(i, p)| format!("{i}-{p}")
                                 children=move |(idx, player)| {
                                     let player_for_pos = player.clone();
                                     let player_for_self = player.clone();
@@ -377,7 +391,12 @@ pub fn App() -> impl IntoView {
                                     if ev.ctrl_key() || ev.meta_key() || ev.alt_key() { return; }
                                     let key = ev.key();
                                     // Only process single-character keys
-                                    if key.chars().count() != 1 { return; }
+                                    if key.chars().count() != 1 {
+                                        if debug_flag.get() || test_mode.get() {
+                                            web_sys::console::log_1(&format!("IGNORED (non-char): key='{}' code='{}'", key, ev.code()).into());
+                                        }
+                                        return;
+                                    }
                                     ev.prevent_default();
                                     if let Some(ch_raw) = key.chars().next() {
                                         // Normalize typed key (covers cases where browser reports a fancy char)
@@ -385,8 +404,36 @@ pub fn App() -> impl IntoView {
                                         let passage_text = passage.get();
                                         let cur_pos = current_position.get();
                                         if let Some(expected_char) = passage_text.chars().nth(cur_pos) {
+                                            // If the expected passage char is a skippable invisible, advance automatically
+                                            if is_skippable(expected_char) {
+                                                if debug_flag.get() || test_mode.get() {
+                                                    web_sys::console::log_1(&format!(
+                                                        "SKIP invisible at pos {}: expected='{}' (U+{:04X})",
+                                                        cur_pos,
+                                                        expected_char,
+                                                        expected_char as u32
+                                                    ).into());
+                                                }
+                                                set_current_position.set(cur_pos + 1);
+                                                return;
+                                            }
                                             let typed_norm = ch;
                                             let expected_norm = normalize_char(expected_char);
+                                            if debug_flag.get() || test_mode.get() {
+                                                web_sys::console::log_1(&format!(
+                                                    "COMPARE pos {} => raw='{}' (U+{:04X}) -> typed_norm='{}' (U+{:04X}); expected='{}' (U+{:04X}) -> expected_norm='{}' (U+{:04X}); equal={}",
+                                                    cur_pos,
+                                                    ch_raw,
+                                                    ch_raw as u32,
+                                                    typed_norm,
+                                                    typed_norm as u32,
+                                                    expected_char,
+                                                    expected_char as u32,
+                                                    expected_norm,
+                                                    expected_norm as u32,
+                                                    typed_norm == expected_norm
+                                                ).into());
+                                            }
                         if typed_norm == expected_norm {
                                                 let next_pos = cur_pos + 1;
                                                 set_current_position.set(next_pos);
@@ -412,12 +459,14 @@ pub fn App() -> impl IntoView {
                                                     // Throttle progress messages (>=100ms between sends)
                                                     let last = last_progress_sent.get();
                                                     if now - last >= 100.0 {
-                                                        WS_REF.with(|cell| {
-                                                            if let Some(ws) = cell.borrow().as_ref() {
-                                                                let msg = ClientMsg::Progress { pos: next_pos, ts: now as u64 };
-                                                                if let Ok(json) = serde_json::to_string(&msg) { let _ = ws.send_with_str(&json); }
-                                                            }
-                                                        });
+                                                        if !test_mode.get() {
+                                                            WS_REF.with(|cell| {
+                                                                if let Some(ws) = cell.borrow().as_ref() {
+                                                                    let msg = ClientMsg::Progress { pos: next_pos, ts: now as u64 };
+                                                                    if let Ok(json) = serde_json::to_string(&msg) { let _ = ws.send_with_str(&json); }
+                                                                }
+                                                            });
+                                                        }
                                                         set_last_progress_sent.set(now);
                                                     }
                                                 }
@@ -435,12 +484,14 @@ pub fn App() -> impl IntoView {
                             set_wpm.set(w.max(0.0));
                             set_accuracy.set(a);
                             set_finish_time.set(Some(elapsed));
-                                                        WS_REF.with(|cell| {
-                                                            if let Some(ws) = cell.borrow().as_ref() {
-                                                                let msg = ClientMsg::Finish { wpm: w, accuracy: a, time: elapsed, ts: now as u64 };
-                                                                if let Ok(json) = serde_json::to_string(&msg) { let _ = ws.send_with_str(&json); }
-                                                            }
-                                                        });
+                                                        if !test_mode.get() {
+                                                            WS_REF.with(|cell| {
+                                                                if let Some(ws) = cell.borrow().as_ref() {
+                                                                    let msg = ClientMsg::Finish { wpm: w, accuracy: a, time: elapsed, ts: now as u64 };
+                                                                    if let Ok(json) = serde_json::to_string(&msg) { let _ = ws.send_with_str(&json); }
+                                                                }
+                                                            });
+                                                        }
                                                     }
                                                 }
                                             } else {
@@ -483,7 +534,7 @@ pub fn App() -> impl IntoView {
                                 <div class="flex flex-wrap justify-center gap-3">
                                     <For
                                         each=move || players.get().into_iter().enumerate()
-                                        key=|(i, p)| format!("{}-{}", i, p)
+                                        key=|(i, p)| format!("{i}-{p}")
                                         children=move |(_idx, player)| {
                                             view! {
                                                 <div class="bg-gradient-to-r from-sky-400 to-cyan-500 text-white px-4 py-2 rounded-full font-semibold shadow-lg">
@@ -503,6 +554,9 @@ pub fn App() -> impl IntoView {
                         <div class="text-center mb-6">
                             <h2 class="text-3xl font-bold text-gray-800 mb-2">"🏆 Race Complete!"</h2>
                         </div>
+                        <Show when=move || test_mode.get()>
+                            <div class="mb-4 p-3 rounded bg-yellow-100 border border-yellow-300 text-yellow-800 text-sm font-medium">"TEST MODE — Local practice (no server sync)"</div>
+                        </Show>
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
                             <div class="text-center p-4 bg-blue-50 rounded-lg">
                                 <div class="text-4xl font-bold text-blue-600">{move || format!("{:.0}", wpm.get())}</div>
@@ -513,7 +567,7 @@ pub fn App() -> impl IntoView {
                                 <div class="text-gray-600">"Accuracy"</div>
                             </div>
                             <div class="text-center p-4 bg-purple-50 rounded-lg">
-                                <div class="text-4xl font-bold text-purple-600">{move || finish_time.get().map(|t| format!("{:.1}s", t)).unwrap_or_else(|| "0s".to_string())}</div>
+                                <div class="text-4xl font-bold text-purple-600">{move || finish_time.get().map(|t| format!("{t:.1}s")).unwrap_or_else(|| "0s".to_string())}</div>
                                 <div class="text-gray-600">"Total Time"</div>
                             </div>
                         </div>
@@ -523,7 +577,7 @@ pub fn App() -> impl IntoView {
                                 <div class="space-y-2">
                                     <For
                                         each=move || leaderboard.get().into_iter().enumerate()
-                                        key=|(i, (name, _, _))| format!("{}-{}", i, name)
+                                        key=|(i, (name, _, _))| format!("{i}-{name}")
                                         children=move |(idx, (name, lwpm, lacc))| {
                                             view! { <div class="p-3 bg-gray-50 rounded-lg">{format!("#{}  {} — {:.0} WPM, {:.0}%", idx + 1, name, lwpm, lacc)}</div> }
                                         }
@@ -544,6 +598,7 @@ pub fn App() -> impl IntoView {
                                     set_finish_time.set(None);
                                     set_leaderboard.set(Vec::new());
                                     set_player_positions.set(HashMap::new());
+                                    set_test_mode.set(false);
                                     WS_REF.with(|cell| {
                                         if let Some(ws) = cell.borrow().as_ref() {
                                             let msg = ClientMsg::Reset;
@@ -553,6 +608,24 @@ pub fn App() -> impl IntoView {
                                 }>
                                 "🏁 Race Again"
                             </button>
+                            <Show when=move || test_mode.get()>
+                                <button class="ml-3 bg-gray-600 text-white px-6 py-3 rounded-lg hover:bg-gray-700 transition-colors font-semibold text-lg"
+                                    on:click=move |_| {
+                                        // Exit local test mode back to waiting
+                                        set_game_state.set("waiting".to_string());
+                                        set_current_position.set(0);
+                                        set_errors.set(0);
+                                        set_wpm.set(0.0);
+                                        set_accuracy.set(100.0);
+                                        set_time_elapsed.set(0.0);
+                                        set_finish_time.set(None);
+                                        set_leaderboard.set(Vec::new());
+                                        set_player_positions.set(HashMap::new());
+                                        set_test_mode.set(false);
+                                    }>
+                                    "Exit Test"
+                                </button>
+                            </Show>
                         </div>
                     </div>
                 </Show>

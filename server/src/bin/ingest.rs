@@ -141,7 +141,7 @@ fn push_chunk(out: &mut Vec<String>, buf: &mut String, next: String, min_len: us
 fn split_sentences(long: &str, max_len: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
-    for sent in long.split(|c| matches!(c, '.' | '!' | '?')) {
+    for sent in long.split(&['.', '!', '?'][..]) {
         let s = normalize_space(sent);
         if s.is_empty() { continue; }
         if cur.len() + s.len() + 1 > max_len {

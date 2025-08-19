@@ -80,7 +80,7 @@ mod tests {
         assert_eq!(raw_wpm(260, 48.0), 65.0);
         
         // Accuracy = 240 / 260 = 92.3%
-        assert!((accuracy(240, 260) - 92.30769230769231).abs() < 0.0001);
+    assert!((accuracy(240, 260) - 92.307_692_307_692_3).abs() < 0.0001);
     }
 
     #[test]

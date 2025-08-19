@@ -23,6 +23,7 @@ pub async fn connect(url: &str) -> anyhow::Result<PgPool> {
 }
 
 /// Get a random passage from DB if available; otherwise fall back to static list.
+#[allow(dead_code)]
 pub async fn get_random_passage(db: Option<&PgPool>) -> String {
     if let Some(pool) = db {
         match sqlx::query_scalar::<_, String>(

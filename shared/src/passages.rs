@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn test_passages_not_empty() {
-        assert!(!PASSAGES.is_empty());
+    assert!(!PASSAGES.is_empty());
         assert!(PASSAGES.len() >= 5);
     }
 

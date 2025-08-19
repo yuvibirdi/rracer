@@ -101,7 +101,7 @@ impl Room {
         }
 
         // Transition to countdown and set t0
-        if let Some(new_state) = { let s = self.state.read().await.clone(); RracerState::transition(&s, &RracerEvent::Join) } {
+    if let Some(new_state) = { let s = *self.state.read().await; RracerState::transition(&s, &RracerEvent::Join) } {
             { let mut sw = self.state.write().await; *sw = new_state; }
             *self.countdown_start.write().await = Some(current_timestamp());
             let p = db_get_random_passage(self.db.as_deref()).await;
@@ -135,7 +135,7 @@ impl Room {
     players.insert(player.id.clone(), player);
     info!("Room {} now has {} players", self.id, players.len());
 
-        if players.len() >= 1 {
+    if !players.is_empty() {
             let mut state = self.state.write().await;
             if *state == RracerState::Finished {
                 info!("Resetting finished game for new player in room {}", self.id);
@@ -381,9 +381,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     if let Some(room_id) = &current_room { if let Some(room_g) = state.rooms.get(room_id) {
                                         let room = room_g.value().clone(); drop(room_g);
                                         // Only allow reset when the room is actually Finished
-                                        let can_reset = { let s = room.state.read().await.clone(); s == RracerState::Finished };
+                                        let can_reset = { let s = *room.state.read().await; s == RracerState::Finished };
                                         if can_reset {
-                                            if let Some(new_state) = { let state = room.state.read().await.clone(); RracerState::transition(&state, &RracerEvent::Reset) } {
+                                            if let Some(new_state) = { let state = *room.state.read().await; RracerState::transition(&state, &RracerEvent::Reset) } {
                                                 let mut state_w = room.state.write().await; *state_w = new_state;
                                                 // Bump race epoch to cancel any lingering bot tasks
                                                 let _ = room.race_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

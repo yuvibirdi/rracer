@@ -5,35 +5,6 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{MessageEvent, WebSocket};
 
-// This optional helper isn't wired into the app yet.
-// Allow dead_code to keep the file around without warnings until it's integrated.
-#[allow(dead_code)]
-#[derive(Clone)]
-pub struct WebSocketManager {
-    ws: Rc<WebSocket>,
-    message_handler: Rc<RefCell<Option<Box<dyn Fn(ServerMsg)>>>>,
-}
-
-#[allow(dead_code)]
-impl WebSocketManager {
-    pub fn new(url: &str) -> Result<Self, JsValue> {
-        let ws = WebSocket::new(url)?;
-        let ws = Rc::new(ws);
-        let message_handler = Rc::new(RefCell::new(None));
-
-        let manager = Self {
-            ws: ws.clone(),
-            message_handler: message_handler.clone(),
-        };
-
-        // Set up event handlers
-    let _ws_clone = ws.clone();
-        let message_handler_clone = message_handler.clone();
-        
-        let onmessage_callback = Closure::wrap(Box::new(move |e: MessageEvent| {
-            if let Ok(text) = e.data().dyn_into::<js_sys::JsString>() {
-                let text: String = text.into();
-                if let Ok(msg) = serde_json::from_str::<ServerMsg>(&text) {
                     if let Some(handler) = message_handler_clone.borrow().as_ref() {
                         handler(msg);
                     }
