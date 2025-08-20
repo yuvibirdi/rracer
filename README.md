@@ -1,28 +1,28 @@
-# RRACER 
-Real‑time multiplayer typing racer.
+# RRACER
+- Real-time, multiplayer typing racer built in Rust with a minimal architecture.
+- Can play with mutliple humans (multiple sever instances) and fills the remaining spots (up to 5) with bots.
 
-## Stack
+## Minimal architecture
+- `server/` — Rust backend binary (handles game rooms, websocket connections, and a Postgres passage store).
+- `web/` — Rust → WASM frontend that connects to the server for real-time play.
+- `shared/` — Shared Rust crate with message types, protocol definitions, and utilities used by both server and web.
 
+## Development (quick start)
+The repository includes a helper script to set up and run everything for development.
 
-## Development
-To build and run:\
-`./setup.sh --run`\
-Opens at http://localhost:3000
+- Ingest passages into the postgres database:
+```bash
+# Put one URL per line in server/urls.txt
+setup.sh --ingest-file server/urls.txt
+```
+- Build and run full app (server + web):
 
-### Passages via Postgres (optional)
+```bash
+./setup.sh --run -r
+```
+for other options just run,
 
-If you set `DATABASE_URL`, the server will select random passages from Postgres.
-
-1. Start Postgres and set the env var:
-	- macOS (Homebrew): `brew services start postgresql@16`
-	- Create DB and user as desired, then export `DATABASE_URL`.
-2. On server start, the schema is created automatically:
-	- `passages(id serial, text text unique, source_url text, created_at timestamptz)`
-3. Ingest passages from the web:
-	- Put URLs in a file like `server/urls.txt` (one per line).
-	- Run the ingestion tool:
-	  - `cargo run -p server --bin ingest -- --file server/urls.txt`
-	- Or pass URLs directly:
-	  - `cargo run -p server --bin ingest -- https://example.com/article1 https://example.com/article2`
-
-When Postgres is not configured or empty, the server falls back to the built-in static passages.
+```bash
+./setup.sh --help
+```
+When Postgres is not configured or the passages table is empty, the server falls back to bundled static passages.
