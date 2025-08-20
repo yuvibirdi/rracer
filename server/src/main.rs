@@ -62,10 +62,7 @@ struct Room {
     passage: Arc<RwLock<Option<String>>>,
     countdown_start: Arc<RwLock<Option<u64>>>,
     waiting_start: Arc<RwLock<Option<u64>>>,
-    // Absolute deadline (ms since epoch) when waiting timer ends
-    waiting_deadline: Arc<RwLock<Option<u64>>>,
     last_timer_second: std::sync::atomic::AtomicU64,
-    race_start_t0: Arc<RwLock<Option<u64>>>,
     race_epoch: Arc<std::sync::atomic::AtomicU64>,
     tx: broadcast::Sender<ServerMsg>,
     db: Option<Arc<PgPool>>,
@@ -81,9 +78,7 @@ impl Room {
             passage: Arc::new(RwLock::new(None)),
             countdown_start: Arc::new(RwLock::new(None)),
             waiting_start: Arc::new(RwLock::new(None)),
-            waiting_deadline: Arc::new(RwLock::new(None)),
             last_timer_second: std::sync::atomic::AtomicU64::new(0),
-            race_start_t0: Arc::new(RwLock::new(None)),
             race_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tx,
             db,
@@ -105,8 +100,8 @@ impl Room {
             return;
         }
 
-        // Transition to countdown and set passage
-        if let Some(new_state) = { let s = *self.state.read().await; RracerState::transition(&s, &RracerEvent::Join) } {
+        // Transition to countdown and set t0
+    if let Some(new_state) = { let s = *self.state.read().await; RracerState::transition(&s, &RracerEvent::Join) } {
             { let mut sw = self.state.write().await; *sw = new_state; }
             *self.countdown_start.write().await = Some(current_timestamp());
             let p = db_get_random_passage(self.db.as_deref()).await;
@@ -130,22 +125,8 @@ impl Room {
             self.broadcast_lobby().await;
             let _ = self.tx.send(ServerMsg::StateChange { state: "countdown".to_string() });
             if let Some(p) = self.passage.read().await.as_ref() { let preview: String = p.chars().take(60).collect(); info!("Room {} countdown, passage preview: {}...", self.id, preview); let _ = self.tx.send(ServerMsg::Countdown { passage: p.clone() }); }
-            info!("Room {} starting race immediately after 10s waiting timer", self.id);
-            // Immediately transition to Racing and start the race (skip extra 3s)
-            {
-                let mut state = self.state.write().await;
-                if let Some(new_state) = RracerState::transition(&*state, &RracerEvent::CountdownElapsed) {
-                    *state = new_state;
-                }
-            }
-            // New race epoch to cancel any stale bot tasks
-            let _ = self.race_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let t0 = current_timestamp();
-            let _ = self.tx.send(ServerMsg::StateChange { state: "racing".to_string() });
-            *self.race_start_t0.write().await = Some(t0);
-            if let Some(passage) = self.passage.read().await.as_ref() { let _ = self.tx.send(ServerMsg::Start { passage: passage.clone(), t0 }); }
-            self.start_bots().await;
-    }
+            info!("Room {} starting countdown with >=2 humans", self.id);
+        }
     }
 
     async fn add_player(&self, player: Player) {
@@ -168,76 +149,22 @@ impl Room {
                 }
             }
         }
-    // Maintain bots so total is always 5 while waiting (only if at least 1 human)
-    if *self.state.read().await == RracerState::Waiting {
-        let humans = { players.values().filter(|p| !p.is_bot).count() };
-        let current_bot_ids: Vec<String> = players.iter().filter(|(_,p)| p.is_bot).map(|(id,_)| id.clone()).collect();
-    let current_bots = current_bot_ids.len();
-        let desired_bots = if humans == 0 { 0 } else { 5usize.saturating_sub(humans) };
-        if current_bots > desired_bots {
-            let remove_n = current_bots - desired_bots;
-            for id in current_bot_ids.into_iter().take(remove_n) { players.remove(&id); }
-        }
-        if current_bots < desired_bots {
-            let need = desired_bots - current_bots;
-            for i in 0..need {
-                let mut rng = rand::thread_rng();
-                let wpm: f64 = rng.gen_range(40.0..90.0);
-                let bot_id = format!("bot-{}-{}-{}", self.id, i, Uuid::new_v4());
-                let bot_name = format!("Bot {}", i + 1);
-                let bot = Player { id: bot_id.clone(), name: bot_name, position: 0, start_time: None, last_keystroke: 0, errors: 0, finished: false, keystroke_count: 0, is_bot: true, bot_speed_wpm: Some(wpm) };
-                players.insert(bot_id, bot);
-            }
-        }
-    }
-    // Broadcast lobby immediately so all clients see final roster
+    // Broadcast lobby immediately so all clients see both players
     drop(players);
     self.broadcast_lobby().await;
-    // If 2+ humans, (re)start the 10s waiting timer
-    let humans = { let g = self.players.read().await; g.values().filter(|p| !p.is_bot).count() };
-    if humans >= 2 {
-        if self.waiting_start.read().await.is_none() {
-            *self.waiting_start.write().await = Some(current_timestamp());
-            self.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
-        }
-    } else {
-        *self.waiting_start.write().await = None;
-        self.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
-    }
+    // Fast path: if 2+ humans, try to start countdown
+    self.try_start_countdown().await;
     }
 
     async fn remove_player(&self, player_id: &str) {
         let mut players = self.players.write().await;
         players.remove(player_id);
-    if players.is_empty() {
+        if players.is_empty() {
             let mut state = self.state.write().await;
             *state = RracerState::Waiting;
             *self.passage.write().await = None;
             *self.countdown_start.write().await = None;
         }
-    // If fewer than 2 humans remain, clear the waiting timer
-    let humans = players.values().filter(|p| !p.is_bot).count();
-    if humans < 2 { *self.waiting_start.write().await = None; self.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed); }
-    // Maintain bots to keep total at 5 while waiting (only if at least 1 human)
-    if *self.state.read().await == RracerState::Waiting {
-        let current_bot_ids: Vec<String> = players.iter().filter(|(_,p)| p.is_bot).map(|(id,_)| id.clone()).collect();
-        let current_bots = current_bot_ids.len();
-        let desired_bots = if humans == 0 { 0 } else { 5usize.saturating_sub(humans) };
-        if current_bots > desired_bots {
-            let remove_n = current_bots - desired_bots;
-            for id in current_bot_ids.into_iter().take(remove_n) { players.remove(&id); }
-        } else if current_bots < desired_bots {
-            let need = desired_bots - current_bots;
-            for i in 0..need {
-                let mut rng = rand::thread_rng();
-                let wpm: f64 = rng.gen_range(40.0..90.0);
-                let bot_id = format!("bot-{}-{}-{}", self.id, i, Uuid::new_v4());
-                let bot_name = format!("Bot {}", i + 1);
-                let bot = Player { id: bot_id.clone(), name: bot_name, position: 0, start_time: None, last_keystroke: 0, errors: 0, finished: false, keystroke_count: 0, is_bot: true, bot_speed_wpm: Some(wpm) };
-                players.insert(bot_id, bot);
-            }
-        }
-    }
         self.broadcast_lobby().await;
     }
 
@@ -285,43 +212,9 @@ impl Room {
         let current_state = *self.state.read().await;
         match current_state {
             RracerState::Waiting => {
-                // Handle 10s wait timer once 2+ humans are present
+                // Retry starting countdown if somehow missed on join
                 let humans = { let g = self.players.read().await; g.values().filter(|p| !p.is_bot).count() };
-                if humans >= 2 {
-                    let now = current_timestamp();
-                    // Initialize deadline if not set
-                    if self.waiting_deadline.read().await.is_none() {
-                        *self.waiting_start.write().await = Some(now);
-                        *self.waiting_deadline.write().await = Some(now + 10_000);
-                        self.last_timer_second.store(10, std::sync::atomic::Ordering::Relaxed);
-                        let _ = self.tx.send(ServerMsg::WaitingTimer { seconds_left: 10 });
-                        info!("Room {} waiting timer started: 10s (deadline = {})", self.id, now + 10_000);
-                    } else if let Some(deadline) = *self.waiting_deadline.read().await {
-                        let remaining_ms = deadline.saturating_sub(now);
-                        let seconds_left = (remaining_ms / 1000) as u64; // floor
-                        let last = self.last_timer_second.load(std::sync::atomic::Ordering::Relaxed);
-                        if seconds_left != last {
-                            let _ = self.tx.send(ServerMsg::WaitingTimer { seconds_left });
-                            self.last_timer_second.store(seconds_left, std::sync::atomic::Ordering::Relaxed);
-                            info!("Room {} waiting seconds_left = {} (remaining_ms = {})", self.id, seconds_left, remaining_ms);
-                        }
-                        if seconds_left == 0 {
-                            // Timer finished -> start race
-                            *self.waiting_start.write().await = None;
-                            *self.waiting_deadline.write().await = None;
-                            self.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
-                            info!("Room {} waiting timer finished; starting race", self.id);
-                            self.try_start_countdown().await;
-                        }
-                    }
-                } else {
-                    // Not enough humans: clear any existing timer
-                    let had_deadline = self.waiting_deadline.read().await.is_some();
-                    *self.waiting_start.write().await = None;
-                    *self.waiting_deadline.write().await = None;
-                    self.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
-                    if had_deadline { info!("Room {} waiting timer cancelled (humans < 2)", self.id); }
-                }
+                if humans >= 2 { self.try_start_countdown().await; }
             }
             RracerState::Countdown => {
                 if let Some(start_time) = *self.countdown_start.read().await {
@@ -480,34 +373,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     _player_name = Some(name);
                                     // Direct lobby snapshot for the joiner
                                     if let Ok(text) = { let g = room_arc.players.read().await; let names: Vec<String> = g.values().map(|p| p.name.clone()).collect(); serde_json::to_string(&ServerMsg::Lobby { players: names }) } { let _ = sender.send(Message::Text(text)).await; }
-                                    // State snapshot for the joiner:
-                                    let state_now = *room_arc.state.read().await;
-                                    match state_now {
-                                        RracerState::Waiting => {
-                                            if let Some(deadline) = *room_arc.waiting_deadline.read().await {
-                                                let now = current_timestamp();
-                                                if now < deadline {
-                                                    let remaining_ms = deadline - now; let seconds_left = ((remaining_ms + 999) / 1000) as u64;
-                                                    if let Ok(text) = serde_json::to_string(&ServerMsg::WaitingTimer { seconds_left }) { let _ = sender.send(Message::Text(text)).await; }
-                                                }
-                                            }
-                                        }
-                                        RracerState::Countdown => {
-                                            if let Some(p) = room_arc.passage.read().await.as_ref() {
-                                                if let Ok(text) = serde_json::to_string(&ServerMsg::StateChange { state: "countdown".to_string() }) { let _ = sender.send(Message::Text(text)).await; }
-                                                if let Ok(text) = serde_json::to_string(&ServerMsg::Countdown { passage: p.clone() }) { let _ = sender.send(Message::Text(text)).await; }
-                                            }
-                                        }
-                                        RracerState::Racing => {
-                                            if let Some(p) = room_arc.passage.read().await.as_ref() {
-                                                if let Ok(text) = serde_json::to_string(&ServerMsg::StateChange { state: "racing".to_string() }) { let _ = sender.send(Message::Text(text)).await; }
-                                                if let Some(t0) = *room_arc.race_start_t0.read().await {
-                                                    if let Ok(text) = serde_json::to_string(&ServerMsg::Start { passage: p.clone(), t0 }) { let _ = sender.send(Message::Text(text)).await; }
-                                                }
-                                            }
-                                        }
-                                        RracerState::Finished => { if let Ok(text) = serde_json::to_string(&ServerMsg::StateChange { state: "finished".to_string() }) { let _ = sender.send(Message::Text(text)).await; } }
-                                    }
                                 }
                                 ClientMsg::Key { ch, ts } => { if let Some(room_id) = &current_room { if let Some(room_g) = state.rooms.get(room_id) { let room = room_g.value().clone(); drop(room_g); room.handle_keystroke(&player_id, ch, ts).await; } } }
                                 ClientMsg::Progress { pos, ts: _ } => { if let Some(room_id) = &current_room { if let Some(room_g) = state.rooms.get(room_id) { let room = room_g.value().clone(); drop(room_g); room.update_player_progress(&player_id, pos).await; } } }
@@ -522,22 +387,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                 let mut state_w = room.state.write().await; *state_w = new_state;
                                                 // Bump race epoch to cancel any lingering bot tasks
                                                 let _ = room.race_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                                *room.passage.write().await = None; *room.countdown_start.write().await = None; *room.waiting_start.write().await = None; *room.waiting_deadline.write().await = None; *room.race_start_t0.write().await = None; room.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
+                                                *room.passage.write().await = None; *room.countdown_start.write().await = None; *room.waiting_start.write().await = None; room.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
                                                 let mut players = room.players.write().await; players.retain(|_,p| !p.is_bot); for p in players.values_mut() { p.position=0; p.start_time=None; p.errors=0; p.finished=false; p.keystroke_count=0; } drop(players);
-                                                let _ = room.tx.send(ServerMsg::StateChange { state: "waiting".to_string() });
-                                                room.broadcast_lobby().await;
-                                                // Re-enter the 10s waiting timer if 2+ humans
-                                                let humans = { let g = room.players.read().await; g.values().filter(|p| !p.is_bot).count() };
-                                                if humans >= 2 {
-                                                    if room.waiting_deadline.read().await.is_none() {
-                                                        let now = current_timestamp();
-                                                        *room.waiting_start.write().await = Some(now);
-                                                        *room.waiting_deadline.write().await = Some(now + 10_000);
-                                                        room.last_timer_second.store(0, std::sync::atomic::Ordering::Relaxed);
-                                                        let _ = room.tx.send(ServerMsg::WaitingTimer { seconds_left: 10 });
-                                                        room.last_timer_second.store(10, std::sync::atomic::Ordering::Relaxed);
-                                                    }
-                                                }
+                                                let _ = room.tx.send(ServerMsg::StateChange { state: "waiting".to_string() }); room.broadcast_lobby().await; room.try_start_countdown().await;
                                             }
                                         } else {
                                             // Send a targeted error back to this client; don't disturb others
