@@ -19,6 +19,8 @@ Options:
   --install-only     Only install Rust tooling (rustup, wasm32 target, trunk); skip build
   --build-only       Only build the web client; do not attempt installs
   --run              Run the server after a successful build
+  -r, --release      Build (web+server) in release mode (default)
+  -d, --debug        Build (web+server) in debug mode (enables testing UI)
   --db-setup         Install/start Postgres (Homebrew), create local DB, and write .env
   --ingest-file PATH Ingest passages from URLs listed in PATH (requires DATABASE_URL)
   -h, --help       Show this help
@@ -26,6 +28,7 @@ Options:
 Notes:
   - This script prefers the rustup-managed toolchain and forces Trunk/Cargo to use it
     to avoid Homebrew cargo/rustc mismatches that break wasm builds.
+  - Debug builds enable the in-app testing UI (gated by cfg!(debug_assertions)).
 EOF
 }
 
@@ -94,13 +97,23 @@ build_web() {
   [[ -d "$WEB_DIR" ]] || err "web directory not found at $WEB_DIR"
   local rb
   rb="$(rustup_bin_dir || true)"
-  log "Building web (WASM) with Trunk..."
+  local mode_msg
+  if [[ "$BUILD_PROFILE" == "release" ]]; then mode_msg="release"; else mode_msg="debug"; fi
+  log "Building web (WASM) with Trunk in $mode_msg mode..."
   pushd "$WEB_DIR" >/dev/null
   if [[ -n "${rb}" ]]; then
-    PATH="${rb}:$PATH" trunk build --release
+    if [[ "$BUILD_PROFILE" == "release" ]]; then
+      PATH="${rb}:$PATH" trunk build --release
+    else
+      PATH="${rb}:$PATH" trunk build
+    fi
   else
     warn "rustup bin not found; using current PATH for trunk"
-    trunk build --release
+    if [[ "$BUILD_PROFILE" == "release" ]]; then
+      trunk build --release
+    else
+      trunk build
+    fi
   fi
   popd >/dev/null
   [[ -f "$WEB_DIR/dist/index.html" ]] || err "Trunk build completed but dist/index.html not found"
@@ -110,7 +123,9 @@ build_web() {
 run_server() {
   local rb
   rb="$(rustup_bin_dir || true)"
-  log "Starting server (Ctrl-C to stop)..."
+  local mode_msg
+  if [[ "$BUILD_PROFILE" == "release" ]]; then mode_msg="release"; else mode_msg="debug"; fi
+  log "Starting server in $mode_msg mode (Ctrl-C to stop)..."
   # Load .env if present for DATABASE_URL
   if [[ -f "$ROOT_DIR/.env" ]]; then
     log "Loading env from $ROOT_DIR/.env"
@@ -118,9 +133,17 @@ run_server() {
     set -a; source "$ROOT_DIR/.env"; set +a
   fi
   if [[ -n "${rb}" ]]; then
-  PATH="${rb}:$PATH" cargo run -p server --bin server
+    if [[ "$BUILD_PROFILE" == "release" ]]; then
+      PATH="${rb}:$PATH" cargo run -p server --release --bin server
+    else
+      PATH="${rb}:$PATH" cargo run -p server --bin server
+    fi
   else
-  cargo run -p server --bin server
+    if [[ "$BUILD_PROFILE" == "release" ]]; then
+      cargo run -p server --release --bin server
+    else
+      cargo run -p server --bin server
+    fi
   fi
 }
 
@@ -189,12 +212,16 @@ BUILD_ONLY=0
 RUN_SERVER=0
 DB_SETUP=0
 INGEST_PATH=""
+# Default to release to match previous behavior
+BUILD_PROFILE="release"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --install-only) INSTALL_ONLY=1 ;;
     --build-only)   BUILD_ONLY=1 ;;
     --run)          RUN_SERVER=1 ;;
+  -r|--release)   BUILD_PROFILE="release" ;;
+  -d|--debug)     BUILD_PROFILE="debug" ;;
     --db-setup)     DB_SETUP=1 ;;
     --ingest-file)
       shift

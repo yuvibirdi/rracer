@@ -11,6 +11,8 @@ use crate::normalize::{normalize_char, is_skippable};
 // Thread-local storage for the active WebSocket. This avoids capturing non-Send/Sync
 // types inside Leptos children closures, which require Fn + Send + Sync.
 thread_local! { static WS_REF: RefCell<Option<WebSocket>> = const { RefCell::new(None) }; }
+// Only enable testing UI in debug builds
+const ALLOW_TEST_UI: bool = cfg!(debug_assertions);
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -285,31 +287,33 @@ pub fn App() -> impl IntoView {
                             prop:disabled=move || joined.get() || connecting.get()>
                             {move || if joined.get() { "Joined" } else if connected.get() { "Join Room" } else { "Connect & Join" }}
                         </button>
-                        <button class="bg-gray-700 text-white px-6 py-3 rounded-lg hover:bg-gray-800 transition-colors font-semibold"
-                            on:click=move |_| {
-                                set_test_mode.set(true);
-                                set_passage.set(crate::normalize::tests_passage());
-                                set_game_state.set("racing".to_string());
-                                set_start_time.set(Some(js_sys::Date::now()));
-                                set_current_position.set(0);
-                                set_errors.set(0);
-                                set_wpm.set(0.0);
-                                set_accuracy.set(100.0);
-                                set_last_progress_sent.set(0.0);
-                                set_player_positions.set(HashMap::new());
-                                let me = player_name.get();
-                                set_players.set(vec![me.clone()]);
-                                set_player_positions.update(|m| { m.insert(me, 0); });
-                                set_waiting_seconds.set(0);
-                                set_finish_time.set(None);
-                                set_leaderboard.set(Vec::new());
-                            }>
-                            {move || if test_mode.get() { "Test Text Loaded" } else { "Load Test Text" }}
-                        </button>
-                        <button class="bg-gray-600 text-white px-4 py-3 rounded-lg hover:bg-gray-700 transition-colors font-semibold"
-                            on:click=move |_| { set_debug_flag.update(|d| *d = !*d); }>
-                            {move || if debug_flag.get() { "Debug: ON" } else { "Debug: OFF" }}
-                        </button>
+                        <Show when=|| ALLOW_TEST_UI>
+                            <button class="bg-gray-700 text-white px-6 py-3 rounded-lg hover:bg-gray-800 transition-colors font-semibold"
+                                on:click=move |_| {
+                                    set_test_mode.set(true);
+                                    set_passage.set(crate::normalize::tests_passage());
+                                    set_game_state.set("racing".to_string());
+                                    set_start_time.set(Some(js_sys::Date::now()));
+                                    set_current_position.set(0);
+                                    set_errors.set(0);
+                                    set_wpm.set(0.0);
+                                    set_accuracy.set(100.0);
+                                    set_last_progress_sent.set(0.0);
+                                    set_player_positions.set(HashMap::new());
+                                    let me = player_name.get();
+                                    set_players.set(vec![me.clone()]);
+                                    set_player_positions.update(|m| { m.insert(me, 0); });
+                                    set_waiting_seconds.set(0);
+                                    set_finish_time.set(None);
+                                    set_leaderboard.set(Vec::new());
+                                }>
+                                {move || if test_mode.get() { "Test Text Loaded" } else { "Load Test Text" }}
+                            </button>
+                            <button class="bg-gray-600 text-white px-4 py-3 rounded-lg hover:bg-gray-700 transition-colors font-semibold"
+                                on:click=move |_| { set_debug_flag.update(|d| *d = !*d); }>
+                                {move || if debug_flag.get() { "Debug: ON" } else { "Debug: OFF" }}
+                            </button>
+                        </Show>
                     </div>
                     <div class="text-sm text-gray-600">
                         "Status: "<span class="font-semibold">{move || if connected.get() { "Connected".to_string() } else { "Disconnected".to_string() }}</span>
@@ -554,7 +558,7 @@ pub fn App() -> impl IntoView {
                         <div class="text-center mb-6">
                             <h2 class="text-3xl font-bold text-gray-800 mb-2">"🏆 Race Complete!"</h2>
                         </div>
-                        <Show when=move || test_mode.get()>
+                        <Show when=move || (ALLOW_TEST_UI && test_mode.get())>
                             <div class="mb-4 p-3 rounded bg-yellow-100 border border-yellow-300 text-yellow-800 text-sm font-medium">"TEST MODE — Local practice (no server sync)"</div>
                         </Show>
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
@@ -608,7 +612,7 @@ pub fn App() -> impl IntoView {
                                 }>
                                 "🏁 Race Again"
                             </button>
-                            <Show when=move || test_mode.get()>
+                            <Show when=move || (ALLOW_TEST_UI && test_mode.get())>
                                 <button class="ml-3 bg-gray-600 text-white px-6 py-3 rounded-lg hover:bg-gray-700 transition-colors font-semibold text-lg"
                                     on:click=move |_| {
                                         // Exit local test mode back to waiting
